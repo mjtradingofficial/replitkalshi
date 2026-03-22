@@ -1,0 +1,288 @@
+"""
+===========================================================
+🧠 KALSHI BTC 15-MIN EXPIRY BOT — STRATEGY OVERVIEW
+===========================================================
+
+OBJECTIVE:
+-----------
+Automatically trade Kalshi Bitcoin (BTC) 15-minute markets by
+buying contracts priced at $0.99 near expiration.
+
+We are NOT predicting direction — we are exploiting pricing behavior.
+
+-----------------------------------------------------------
+📊 HOW KALSHI MARKETS WORK
+-----------------------------------------------------------
+Each BTC market asks:
+
+    "Will Bitcoin be UP or DOWN over this 15-minute window?"
+
+There are two contracts:
+    YES  -> resolves to $1 if true, $0 if false
+    NO   -> resolves to $1 if false, $0 if true
+
+Prices range from $0.00 to $1.00.
+
+Example:
+    YES = 0.99 → Market implies 99% chance outcome is YES
+    NO  = 0.01 → Opposite side
+
+-----------------------------------------------------------
+🎯 STRATEGY IDEA
+-----------------------------------------------------------
+We wait until:
+    1. Less than 2 minutes remain in the market
+    2. One side (YES or NO) is priced at ≥ $0.99
+
+Then:
+    → We buy that side
+
+Why?
+    At $0.99, max profit = $0.01 per contract
+    But implied probability is extremely high
+
+We are betting:
+    "The market is correct in the final moments"
+
+-----------------------------------------------------------
+⚠️ RISKS
+-----------------------------------------------------------
+- Price can reverse in final seconds
+- Order may not get filled (queue priority)
+- Latency (Replit is slower than pro setups)
+- Fees may reduce profitability
+
+-----------------------------------------------------------
+🤖 BOT BEHAVIOR
+-----------------------------------------------------------
+This bot runs continuously and:
+
+1. Fetches all BTC markets
+2. Identifies the active one (nearest expiry)
+3. Tracks time remaining
+4. When < 120 seconds:
+       - Reads orderbook
+       - Checks if YES or NO ≥ 0.99
+5. Executes a MARKET BUY order
+6. Ensures only ONE trade per market
+7. Automatically rolls into next 15-min market
+
+-----------------------------------------------------------
+🔁 IMPORTANT DESIGN CHOICES
+-----------------------------------------------------------
+- Polling every 0.5 seconds (simple + reliable)
+- Market orders (guarantees execution if available)
+- No prediction logic (pure execution strategy)
+- Replit-compatible (easy deployment)
+
+-----------------------------------------------------------
+🚀 FUTURE IMPROVEMENTS
+-----------------------------------------------------------
+- Switch to WebSockets (faster)
+- Enter at 0.97–0.99 instead of waiting
+- Add position tracking / PnL
+- Move to low-latency server (AWS)
+
+===========================================================
+"""
+
+import requests
+import time
+import hmac
+import hashlib
+import base64
+import json
+import os
+from datetime import datetime, timezone
+from flask import Flask
+from threading import Thread
+
+# =========================
+# 🔒 ENV VARIABLES (Replit Secrets)
+# =========================
+API_KEY = os.getenv("API_KEY")
+API_SECRET = os.getenv("API_SECRET")
+
+BASE_URL = "https://trading-api.kalshi.com/trade-api/v2"
+
+# =========================
+# ⚙️ SETTINGS
+# =========================
+TRADE_SIZE = 10
+CHECK_INTERVAL = 0.5  # seconds
+
+# Track markets already traded
+traded_markets = set()
+
+# =========================
+# 🌐 KEEP-ALIVE SERVER
+# =========================
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is running"
+
+def run_server():
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = Thread(target=run_server)
+    t.start()
+
+# =========================
+# 🔐 SIGNATURE FUNCTION
+# =========================
+def sign_request(method, path, body=""):
+    timestamp = str(int(time.time() * 1000))
+    message = timestamp + method + path + body
+
+    signature = base64.b64encode(
+        hmac.new(API_SECRET.encode(), message.encode(), hashlib.sha256).digest()
+    ).decode()
+
+    return {
+        "Content-Type": "application/json",
+        "KALSHI-ACCESS-KEY": API_KEY,
+        "KALSHI-ACCESS-SIGNATURE": signature,
+        "KALSHI-ACCESS-TIMESTAMP": timestamp,
+    }
+
+# =========================
+# 📡 GET BTC MARKETS
+# =========================
+def get_markets():
+    path = "/markets"
+    url = BASE_URL + path
+
+    headers = sign_request("GET", path)
+    res = requests.get(url, headers=headers, timeout=5)
+
+    data = res.json()
+
+    btc_markets = [
+        m for m in data.get("markets", [])
+        if "BTC" in m["ticker"]
+    ]
+
+    return btc_markets
+
+# =========================
+# ⏱️ FIND ACTIVE MARKET
+# =========================
+def get_active_market(markets):
+    now = datetime.now(timezone.utc)
+
+    future = []
+    for m in markets:
+        expiry = datetime.fromisoformat(
+            m["expiration_time"].replace("Z", "+00:00")
+        )
+        if expiry > now:
+            future.append((m, expiry))
+
+    if not future:
+        return None
+
+    # choose market expiring soonest
+    return min(future, key=lambda x: x[1])[0]
+
+# =========================
+# 📊 GET ORDERBOOK
+# =========================
+def get_orderbook(ticker):
+    path = f"/markets/{ticker}/orderbook"
+    url = BASE_URL + path
+
+    headers = sign_request("GET", path)
+    res = requests.get(url, headers=headers, timeout=5)
+
+    return res.json()
+
+# =========================
+# 💸 PLACE ORDER
+# =========================
+def place_order(ticker, side):
+    path = "/orders"
+    url = BASE_URL + path
+
+    order = {
+        "ticker": ticker,
+        "action": "buy",
+        "side": side,
+        "type": "market",
+        "count": TRADE_SIZE
+    }
+
+    body = json.dumps(order)
+    headers = sign_request("POST", path, body)
+
+    res = requests.post(url, headers=headers, data=body, timeout=5)
+
+    print("🟢 ORDER PLACED:", ticker, side)
+    print("📩 RESPONSE:", res.json())
+
+# =========================
+# 🚀 MAIN LOOP
+# =========================
+def run_bot():
+    print("🚀 Bot started...")
+
+    while True:
+        try:
+            markets = get_markets()
+            market = get_active_market(markets)
+
+            if not market:
+                time.sleep(1)
+                continue
+
+            ticker = market["ticker"]
+
+            # prevent duplicate trades
+            if ticker in traded_markets:
+                time.sleep(CHECK_INTERVAL)
+                continue
+
+            expiry = datetime.fromisoformat(
+                market["expiration_time"].replace("Z", "+00:00")
+            )
+
+            now = datetime.now(timezone.utc)
+            time_left = (expiry - now).total_seconds()
+
+            print(f"{ticker} | time left: {int(time_left)}s")
+
+            # 🎯 CORE STRATEGY TRIGGER
+            if time_left < 120:
+                ob = get_orderbook(ticker)
+
+                yes_asks = ob["orderbook"]["yes"]["asks"]
+                no_asks = ob["orderbook"]["no"]["asks"]
+
+                yes_price = yes_asks[0]["price"] if yes_asks else 0
+                no_price = no_asks[0]["price"] if no_asks else 0
+
+                print(f"YES: {yes_price} | NO: {no_price}")
+
+                # 🎯 EXECUTION CONDITION
+                if yes_price >= 0.99:
+                    place_order(ticker, "yes")
+                    traded_markets.add(ticker)
+
+                elif no_price >= 0.99:
+                    place_order(ticker, "no")
+                    traded_markets.add(ticker)
+
+            time.sleep(CHECK_INTERVAL)
+
+        except Exception as e:
+            print("❌ Error:", e)
+            time.sleep(1)
+
+# =========================
+# ▶️ START BOT
+# =========================
+if __name__ == "__main__":
+    keep_alive()
+    run_bot()
