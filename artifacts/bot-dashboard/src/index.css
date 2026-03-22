@@ -1,0 +1,77 @@
+@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Sora:wght@300;400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: 'Sora', sans-serif;
+  --font-mono: 'Fira Code', monospace;
+
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-card-border: hsl(var(--card-border));
+  
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-primary-glow: hsl(var(--primary) / 0.5);
+  
+  --color-success: hsl(var(--success));
+  --color-success-glow: hsl(var(--success) / 0.5);
+  
+  --color-danger: hsl(var(--danger));
+  --color-danger-glow: hsl(var(--danger) / 0.5);
+  
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+}
+
+:root {
+  /* Dark Mode Trading Terminal Palette */
+  --background: 240 33% 3%;
+  --foreground: 0 0% 95%;
+  
+  --card: 240 25% 6%;
+  --card-border: 240 25% 12%;
+  
+  --primary: 184 100% 50%;
+  --primary-foreground: 240 33% 3%;
+  
+  --success: 157 100% 50%;
+  --danger: 340 100% 50%;
+  
+  --muted: 240 20% 15%;
+  --muted-foreground: 240 10% 60%;
+}
+
+@layer base {
+  body {
+    @apply bg-background text-foreground font-sans antialiased overflow-x-hidden;
+    background-image: 
+      linear-gradient(to right, rgba(255,255,255,0.015) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(255,255,255,0.015) 1px, transparent 1px);
+    background-size: 40px 40px;
+    background-position: center center;
+  }
+}
+
+@layer utilities {
+  .text-shadow-glow-primary {
+    text-shadow: 0 0 10px var(--color-primary-glow);
+  }
+  .text-shadow-glow-success {
+    text-shadow: 0 0 10px var(--color-success-glow);
+  }
+  .text-shadow-glow-danger {
+    text-shadow: 0 0 10px var(--color-danger-glow);
+  }
+  
+  .box-shadow-glow-success {
+    box-shadow: 0 0 20px -5px var(--color-success-glow);
+  }
+  .box-shadow-glow-danger {
+    box-shadow: 0 0 20px -5px var(--color-danger-glow);
+  }
+  
+  .glass-panel {
+    @apply bg-card/80 backdrop-blur-xl border border-card-border shadow-2xl;
+  }
+}

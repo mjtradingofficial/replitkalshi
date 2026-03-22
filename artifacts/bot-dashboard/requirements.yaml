@@ -1,0 +1,14 @@
+packages:
+  "framer-motion": "Animations and fluid layout transitions for the terminal UI"
+  "date-fns": "Formatting timestamps and active market countdowns"
+  "clsx": "Class name merging utility"
+  "tailwind-merge": "Tailwind utility class merging"
+
+images:
+  - path: "artifacts/bot-dashboard/public/images/bg-glow.png"
+    description: "Abstract subtle deep blue and cyan radial gradient glow on black background, very dark and moody"
+    aspect_ratio: "16:9"
+
+notes:
+  - "Assuming React Query hooks are exported from @workspace/api-client-react"
+  - "The API returns yesPrice and noPrice in dollars (e.g. 0.99) but the start bot config takes thresholdCents (e.g. 99)"

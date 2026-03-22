@@ -1,15 +1,16 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Kalshi BTC Bot API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: bot
+    description: Bot control and monitoring
 paths:
   /healthz:
     get:
@@ -24,6 +25,74 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /bot/status:
+    get:
+      operationId: getBotStatus
+      tags: [bot]
+      summary: Get bot status
+      description: Returns current bot state, active market info, and counters
+      responses:
+        "200":
+          description: Bot status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
+  /bot/trades:
+    get:
+      operationId: getBotTrades
+      tags: [bot]
+      summary: Get trade history
+      description: Returns list of all trades executed by the bot
+      responses:
+        "200":
+          description: Trade history
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradeList"
+
+  /bot/start:
+    post:
+      operationId: startBot
+      tags: [bot]
+      summary: Start the bot
+      description: Start the bot with optional configuration overrides
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BotStartConfig"
+      responses:
+        "200":
+          description: Bot started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotActionResponse"
+        "400":
+          description: Error starting bot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotActionResponse"
+
+  /bot/stop:
+    post:
+      operationId: stopBot
+      tags: [bot]
+      summary: Stop the bot
+      description: Send a stop signal to the bot
+      responses:
+        "200":
+          description: Stop signal sent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotActionResponse"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +103,118 @@ components:
       required:
         - status
 
+    MarketInfo:
+      type: object
+      properties:
+        ticker:
+          type: string
+        expirationTime:
+          type: string
+        timeLeftSeconds:
+          type: number
+        yesPrice:
+          type: number
+          nullable: true
+        noPrice:
+          type: number
+          nullable: true
+      required:
+        - ticker
+        - expirationTime
+        - timeLeftSeconds
+        - yesPrice
+        - noPrice
+
+    BotStatus:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [idle, running, stopped, error]
+        startedAt:
+          type: string
+          nullable: true
+        currentMarket:
+          $ref: "#/components/schemas/MarketInfo"
+          nullable: true
+        lastPollAt:
+          type: string
+          nullable: true
+        lastError:
+          type: string
+          nullable: true
+        totalTrades:
+          type: integer
+        tradedMarkets:
+          type: array
+          items:
+            type: string
+      required:
+        - status
+        - startedAt
+        - currentMarket
+        - lastPollAt
+        - lastError
+        - totalTrades
+        - tradedMarkets
+
+    Trade:
+      type: object
+      properties:
+        id:
+          type: string
+        ticker:
+          type: string
+        side:
+          type: string
+          enum: [yes, no]
+        price:
+          type: number
+        count:
+          type: integer
+        timestamp:
+          type: string
+      required:
+        - id
+        - ticker
+        - side
+        - price
+        - count
+        - timestamp
+
+    TradeList:
+      type: object
+      properties:
+        trades:
+          type: array
+          items:
+            $ref: "#/components/schemas/Trade"
+      required:
+        - trades
+
+    BotStartConfig:
+      type: object
+      properties:
+        tradeSize:
+          type: integer
+          description: Number of contracts to buy per trade
+        thresholdCents:
+          type: integer
+          description: Price threshold in cents (e.g. 99 = $0.99)
+        windowSeconds:
+          type: integer
+          description: Seconds before expiry to start watching
+        checkIntervalMs:
+          type: integer
+          description: Polling interval in milliseconds
+
+    BotActionResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+      required:
+        - success
+        - message
