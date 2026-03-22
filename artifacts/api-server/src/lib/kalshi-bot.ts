@@ -43,12 +43,10 @@ function signRequest(
 ): Record<string, string> {
   const timestamp = String(Date.now());
   const message = timestamp + method + path + body;
-
   const signature = crypto
     .createHmac("sha256", apiSecret)
     .update(message)
     .digest("base64");
-
   return {
     "Content-Type": "application/json",
     "KALSHI-ACCESS-KEY": apiKey,
@@ -97,15 +95,12 @@ interface KalshiMarket {
   status: string;
 }
 
-interface KalshiOrderbookLevel {
-  price: number;
-  quantity: number;
-}
-
-interface KalshiOrderbook {
-  orderbook: {
-    yes?: KalshiOrderbookLevel[];
-    no?: KalshiOrderbookLevel[];
+// Orderbook_fp prices are returned as [string_price, string_quantity] pairs
+// Sorted ascending by price (lowest ask first)
+interface KalshiOrderbookFp {
+  orderbook_fp: {
+    yes_dollars?: [string, string][];
+    no_dollars?: [string, string][];
   };
 }
 
@@ -126,95 +121,186 @@ export function getBotState(): BotState {
   return { ...state, trades: [...state.trades] };
 }
 
-async function fetchBtcMarkets(
+async function fetchOpenBtc15mMarkets(
   apiKey: string,
   apiSecret: string,
 ): Promise<KalshiMarket[]> {
-  const data = await kalshiGet<{ markets: KalshiMarket[] }>(
-    "/markets?ticker=BTC",
+  const results: KalshiMarket[] = [];
+  let cursor = "";
+  let pages = 0;
+
+  while (pages < 5) {
+    const qs = `/markets?series_ticker=KXBTC15M&status=open&limit=100${cursor ? `&cursor=${cursor}` : ""}`;
+    const data = await kalshiGet<{
+      markets: KalshiMarket[];
+      cursor?: string;
+    }>(qs, apiKey, apiSecret);
+
+    results.push(...(data.markets ?? []));
+    cursor = data.cursor ?? "";
+    pages++;
+    if (!cursor) break;
+  }
+
+  return results;
+}
+
+async function getOrderbookPrices(
+  ticker: string,
+  apiKey: string,
+  apiSecret: string,
+): Promise<{ yesPrice: number | null; noPrice: number | null }> {
+  const ob = await kalshiGet<KalshiOrderbookFp>(
+    `/markets/${ticker}/orderbook`,
     apiKey,
     apiSecret,
   );
-  return (data.markets ?? []).filter((m) => m.ticker.includes("BTC"));
-}
 
-function getActiveMarket(
-  markets: KalshiMarket[],
-): { market: KalshiMarket; expiry: Date } | null {
-  const now = new Date();
-  const future = markets
-    .map((m) => ({
-      market: m,
-      expiry: new Date(m.expiration_time),
-    }))
-    .filter(({ expiry }) => expiry > now);
+  // yes_dollars / no_dollars are [price_string, qty_string][] sorted ascending by price
+  // They represent BID levels — the LAST entry is the highest (best) bid for each side
+  // YES price (highest YES bid) ≈ probability YES wins
+  // NO price (highest NO bid) ≈ probability NO wins
+  const yesDollars = ob.orderbook_fp?.yes_dollars ?? [];
+  const noDollars = ob.orderbook_fp?.no_dollars ?? [];
 
-  if (!future.length) return null;
-  return future.reduce((min, cur) => (cur.expiry < min.expiry ? cur : min));
+  // Take the LAST element (highest bid) — prices are strings like "0.9900"
+  const yesPrice =
+    yesDollars.length > 0
+      ? parseFloat(yesDollars[yesDollars.length - 1][0])
+      : null;
+  const noPrice =
+    noDollars.length > 0
+      ? parseFloat(noDollars[noDollars.length - 1][0])
+      : null;
+
+  return { yesPrice, noPrice };
 }
 
 async function runLoop(
   apiKey: string,
   apiSecret: string,
   tradeSize: number,
-  thresholdCents: number,
+  threshold: number,
   windowSeconds: number,
   checkIntervalMs: number,
 ): Promise<void> {
-  const threshold = thresholdCents / 100;
-
   while (!stopRequested) {
     try {
       state.lastPollAt = new Date().toISOString();
 
-      const markets = await fetchBtcMarkets(apiKey, apiSecret);
-      const active = getActiveMarket(markets);
+      const markets = await fetchOpenBtc15mMarkets(apiKey, apiSecret);
+      const now = new Date();
 
-      if (!active) {
+      // Sort by time left ascending — find any market in the window
+      const inWindow = markets
+        .map((m) => ({
+          market: m,
+          expiry: new Date(m.expiration_time),
+          timeLeftSeconds: (new Date(m.expiration_time).getTime() - now.getTime()) / 1000,
+        }))
+        .filter(
+          ({ timeLeftSeconds, market }) =>
+            timeLeftSeconds > 0 &&
+            timeLeftSeconds < windowSeconds &&
+            !state.tradedMarkets.includes(market.ticker),
+        )
+        .sort((a, b) => a.timeLeftSeconds - b.timeLeftSeconds);
+
+      // Update currentMarket to the nearest expiring one (even outside window, for display)
+      const nearest = markets
+        .map((m) => ({
+          market: m,
+          expiry: new Date(m.expiration_time),
+          timeLeftSeconds: (new Date(m.expiration_time).getTime() - now.getTime()) / 1000,
+        }))
+        .filter(({ timeLeftSeconds }) => timeLeftSeconds > 0)
+        .sort((a, b) => a.timeLeftSeconds - b.timeLeftSeconds)[0];
+
+      if (nearest) {
+        // Always fetch the nearest market's price for dashboard display
+        let displayYes = state.currentMarket?.ticker === nearest.market.ticker
+          ? state.currentMarket.yesPrice
+          : null;
+        let displayNo = state.currentMarket?.ticker === nearest.market.ticker
+          ? state.currentMarket.noPrice
+          : null;
+
+        // Refresh display prices every ~5 seconds (10 ticks at 500ms)
+        const shouldRefreshDisplay =
+          displayYes === null ||
+          displayNo === null ||
+          Math.random() < 0.1; // ~10% chance each tick ≈ once per 5s
+
+        if (shouldRefreshDisplay) {
+          try {
+            const prices = await getOrderbookPrices(
+              nearest.market.ticker,
+              apiKey,
+              apiSecret,
+            );
+            displayYes = prices.yesPrice;
+            displayNo = prices.noPrice;
+          } catch {
+            // keep existing values
+          }
+        }
+
+        state.currentMarket = {
+          ticker: nearest.market.ticker,
+          expirationTime: nearest.expiry.toISOString(),
+          timeLeftSeconds: Math.max(0, nearest.timeLeftSeconds),
+          yesPrice: displayYes,
+          noPrice: displayNo,
+        };
+      } else {
         state.currentMarket = null;
-        await sleep(1000);
-        continue;
       }
 
-      const { market, expiry } = active;
-      const ticker = market.ticker;
-      const timeLeftSeconds = (expiry.getTime() - Date.now()) / 1000;
-
-      state.currentMarket = {
-        ticker,
-        expirationTime: expiry.toISOString(),
-        timeLeftSeconds: Math.max(0, timeLeftSeconds),
-        yesPrice: null,
-        noPrice: null,
-      };
-
-      if (state.tradedMarkets.includes(ticker)) {
+      if (inWindow.length === 0) {
+        if (nearest) {
+          logger.debug(
+            {
+              ticker: nearest.market.ticker,
+              timeLeftSeconds: Math.round(nearest.timeLeftSeconds),
+            },
+            "Watching market, not in window yet",
+          );
+        } else {
+          logger.debug("No open KXBTC15M markets found");
+        }
         await sleep(checkIntervalMs);
         continue;
       }
 
-      if (timeLeftSeconds < windowSeconds) {
-        const ob = await kalshiGet<KalshiOrderbook>(
-          `/markets/${ticker}/orderbook`,
+      // Check each market in the window
+      for (const { market, timeLeftSeconds } of inWindow) {
+        if (stopRequested) break;
+        const ticker = market.ticker;
+
+        const { yesPrice, noPrice } = await getOrderbookPrices(
+          ticker,
           apiKey,
           apiSecret,
         );
 
-        const yesAsks = ob.orderbook?.yes ?? [];
-        const noAsks = ob.orderbook?.no ?? [];
-
-        const yesPrice = yesAsks.length > 0 ? yesAsks[0].price / 100 : null;
-        const noPrice = noAsks.length > 0 ? noAsks[0].price / 100 : null;
-
-        state.currentMarket = {
-          ...state.currentMarket,
-          yesPrice,
-          noPrice,
-        };
+        // Update display if this is the nearest market
+        if (state.currentMarket?.ticker === ticker) {
+          state.currentMarket = {
+            ...state.currentMarket,
+            yesPrice,
+            noPrice,
+          };
+        }
 
         logger.info(
-          { ticker, timeLeftSeconds: Math.round(timeLeftSeconds), yesPrice, noPrice },
-          "Orderbook snapshot",
+          {
+            ticker,
+            timeLeftSeconds: Math.round(timeLeftSeconds),
+            yesPrice,
+            noPrice,
+            threshold,
+          },
+          "Orderbook check",
         );
 
         let tradeSide: "yes" | "no" | null = null;
@@ -265,11 +351,6 @@ async function runLoop(
 
           logger.info({ trade }, "Order placed successfully");
         }
-      } else {
-        logger.debug(
-          { ticker, timeLeftSeconds: Math.round(timeLeftSeconds) },
-          "Waiting for entry window",
-        );
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -291,7 +372,7 @@ function sleep(ms: number): Promise<void> {
 
 export interface BotConfig {
   tradeSize?: number;
-  thresholdCents?: number;
+  threshold?: number;
   windowSeconds?: number;
   checkIntervalMs?: number;
 }
@@ -311,7 +392,7 @@ export function startBot(config: BotConfig = {}): void {
 
   const {
     tradeSize = 10,
-    thresholdCents = 99,
+    threshold = 0.99,
     windowSeconds = 120,
     checkIntervalMs = 500,
   } = config;
@@ -322,15 +403,15 @@ export function startBot(config: BotConfig = {}): void {
   state.lastError = null;
 
   logger.info(
-    { tradeSize, thresholdCents, windowSeconds, checkIntervalMs },
-    "Starting Kalshi BTC bot",
+    { tradeSize, threshold, windowSeconds, checkIntervalMs },
+    "Starting Kalshi BTC15M bot",
   );
 
   runLoop(
     apiKey,
     apiSecret,
     tradeSize,
-    thresholdCents,
+    threshold,
     windowSeconds,
     checkIntervalMs,
   ).catch((err) => {

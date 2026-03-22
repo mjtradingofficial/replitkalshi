@@ -28,13 +28,13 @@ router.get("/bot/trades", (_req, res) => {
 router.post("/bot/start", (req, res) => {
   const {
     tradeSize,
-    thresholdCents,
+    threshold,
     windowSeconds,
     checkIntervalMs,
   } = req.body as Record<string, number | undefined>;
 
   try {
-    startBot({ tradeSize, thresholdCents, windowSeconds, checkIntervalMs });
+    startBot({ tradeSize, threshold, windowSeconds, checkIntervalMs });
     res.json({ success: true, message: "Bot started" });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
