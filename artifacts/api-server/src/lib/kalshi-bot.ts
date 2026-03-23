@@ -3,6 +3,18 @@ import { logger } from "./logger";
 
 const BASE_URL = "https://api.elections.kalshi.com/trade-api/v2";
 
+// Load RSA private key once. The env var is a base64-encoded PKCS#1 DER private key
+// (spaces are present because PEM newlines were replaced with spaces when stored).
+// Kalshi uses RSA-PSS (SHA-256, saltLength=32) for request signing.
+function loadPrivateKey(secret: string): crypto.KeyObject {
+  const cleanBase64 = secret.replace(/\s+/g, "");
+  const pem =
+    "-----BEGIN RSA PRIVATE KEY-----\n" +
+    (cleanBase64.match(/.{1,64}/g) ?? []).join("\n") +
+    "\n-----END RSA PRIVATE KEY-----";
+  return crypto.createPrivateKey(pem);
+}
+
 export type BotStatus = "idle" | "running" | "stopped" | "error";
 
 export interface Trade {
@@ -39,14 +51,18 @@ function signRequest(
   path: string,
   body: string,
   apiKey: string,
-  apiSecret: string,
+  privateKey: crypto.KeyObject,
 ): Record<string, string> {
   const timestamp = String(Date.now());
   const message = timestamp + method + path + body;
+  // Kalshi Elections API: RSA-PSS with SHA-256, salt length = 32 (digest size)
   const signature = crypto
-    .createHmac("sha256", apiSecret)
-    .update(message)
-    .digest("base64");
+    .sign("sha256", Buffer.from(message), {
+      key: privateKey,
+      padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
+      saltLength: 32,
+    })
+    .toString("base64");
   return {
     "Content-Type": "application/json",
     "KALSHI-ACCESS-KEY": apiKey,
@@ -55,13 +71,9 @@ function signRequest(
   };
 }
 
-async function kalshiGet<T>(
-  path: string,
-  apiKey: string,
-  apiSecret: string,
-): Promise<T> {
-  const headers = signRequest("GET", path, "", apiKey, apiSecret);
-  const res = await fetch(`${BASE_URL}${path}`, { headers });
+// Public (unauthenticated) GET — used for markets and orderbooks which are public
+async function kalshiPublicGet<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE_URL}${path}`);
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Kalshi GET ${path} failed ${res.status}: ${text}`);
@@ -73,10 +85,10 @@ async function kalshiPost<T>(
   path: string,
   body: object,
   apiKey: string,
-  apiSecret: string,
+  privateKey: crypto.KeyObject,
 ): Promise<T> {
   const bodyStr = JSON.stringify(body);
-  const headers = signRequest("POST", path, bodyStr, apiKey, apiSecret);
+  const headers = signRequest("POST", path, bodyStr, apiKey, privateKey);
   const res = await fetch(`${BASE_URL}${path}`, {
     method: "POST",
     headers,
@@ -121,20 +133,17 @@ export function getBotState(): BotState {
   return { ...state, trades: [...state.trades] };
 }
 
-async function fetchOpenBtc15mMarkets(
-  apiKey: string,
-  apiSecret: string,
-): Promise<KalshiMarket[]> {
+async function fetchOpenBtc15mMarkets(): Promise<KalshiMarket[]> {
   const results: KalshiMarket[] = [];
   let cursor = "";
   let pages = 0;
 
   while (pages < 5) {
     const qs = `/markets?series_ticker=KXBTC15M&status=open&limit=100${cursor ? `&cursor=${cursor}` : ""}`;
-    const data = await kalshiGet<{
+    const data = await kalshiPublicGet<{
       markets: KalshiMarket[];
       cursor?: string;
-    }>(qs, apiKey, apiSecret);
+    }>(qs);
 
     results.push(...(data.markets ?? []));
     cursor = data.cursor ?? "";
@@ -147,13 +156,9 @@ async function fetchOpenBtc15mMarkets(
 
 async function getOrderbookPrices(
   ticker: string,
-  apiKey: string,
-  apiSecret: string,
 ): Promise<{ yesPrice: number | null; noPrice: number | null }> {
-  const ob = await kalshiGet<KalshiOrderbookFp>(
+  const ob = await kalshiPublicGet<KalshiOrderbookFp>(
     `/markets/${ticker}/orderbook`,
-    apiKey,
-    apiSecret,
   );
 
   // yes_dollars / no_dollars are [price_string, qty_string][] sorted ascending by price
@@ -178,17 +183,21 @@ async function getOrderbookPrices(
 
 async function runLoop(
   apiKey: string,
-  apiSecret: string,
+  privateKey: crypto.KeyObject,
   tradeSize: number,
   threshold: number,
   windowSeconds: number,
   checkIntervalMs: number,
 ): Promise<void> {
+  let displayRefreshTick = 0;
+  const DISPLAY_REFRESH_EVERY = 10; // refresh display price every N ticks
+
   while (!stopRequested) {
     try {
       state.lastPollAt = new Date().toISOString();
+      displayRefreshTick++;
 
-      const markets = await fetchOpenBtc15mMarkets(apiKey, apiSecret);
+      const markets = await fetchOpenBtc15mMarkets(apiKey, privateKey);
       const now = new Date();
 
       // Sort by time left ascending — find any market in the window
@@ -225,18 +234,18 @@ async function runLoop(
           ? state.currentMarket.noPrice
           : null;
 
-        // Refresh display prices every ~5 seconds (10 ticks at 500ms)
+        // Refresh display prices every DISPLAY_REFRESH_EVERY ticks (deterministic)
         const shouldRefreshDisplay =
           displayYes === null ||
           displayNo === null ||
-          Math.random() < 0.1; // ~10% chance each tick ≈ once per 5s
+          displayRefreshTick % DISPLAY_REFRESH_EVERY === 0;
 
         if (shouldRefreshDisplay) {
           try {
             const prices = await getOrderbookPrices(
               nearest.market.ticker,
               apiKey,
-              apiSecret,
+              privateKey,
             );
             displayYes = prices.yesPrice;
             displayNo = prices.noPrice;
@@ -280,7 +289,7 @@ async function runLoop(
         const { yesPrice, noPrice } = await getOrderbookPrices(
           ticker,
           apiKey,
-          apiSecret,
+          privateKey,
         );
 
         // Update display if this is the nearest market
@@ -320,19 +329,25 @@ async function runLoop(
             "Placing order",
           );
 
+          // Kalshi orders API: side determines which price field to include
+          // yes_price / no_price must be in CENTS (integer 1-99)
+          const priceInCents = Math.round(tradePrice * 100);
           const orderBody = {
             ticker,
             action: "buy",
             side: tradeSide,
-            type: "market",
+            type: "limit",
             count: tradeSize,
+            ...(tradeSide === "yes"
+              ? { yes_price: priceInCents }
+              : { no_price: priceInCents }),
           };
 
           const response = await kalshiPost<unknown>(
             "/orders",
             orderBody,
             apiKey,
-            apiSecret,
+            privateKey,
           );
 
           const trade: Trade = {
@@ -390,6 +405,9 @@ export function startBot(config: BotConfig = {}): void {
     throw new Error("KALSHI_API_KEY and KALSHI_API_SECRET must be set");
   }
 
+  // Load RSA private key once at startup
+  const privateKey = loadPrivateKey(apiSecret);
+
   const {
     tradeSize = 10,
     threshold = 0.99,
@@ -404,12 +422,12 @@ export function startBot(config: BotConfig = {}): void {
 
   logger.info(
     { tradeSize, threshold, windowSeconds, checkIntervalMs },
-    "Starting Kalshi BTC15M bot",
+    "Starting Kalshi BTC15M bot (RSA-PSS auth)",
   );
 
   runLoop(
     apiKey,
-    apiSecret,
+    privateKey,
     tradeSize,
     threshold,
     windowSeconds,
