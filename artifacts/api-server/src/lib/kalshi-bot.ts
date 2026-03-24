@@ -335,9 +335,6 @@ async function runLoop(
           // Kalshi prices must be 1-99 cents (integer); cap in case of floating point rounding
           const priceInCents = Math.min(99, Math.max(1, Math.floor(tradePrice * 100)));
 
-          // Mark market as traded immediately so we never retry this window on error
-          state.tradedMarkets.push(ticker);
-
           let contractCount = tradeSize; // fallback
           try {
             const balanceResp = await kalshiAuthGet<{ balance: number }>(
@@ -392,12 +389,13 @@ async function runLoop(
             };
 
             state.trades.unshift(trade);
+            state.tradedMarkets.push(ticker);
             state.totalTrades += 1;
             logger.info({ trade }, "Order placed successfully");
           } catch (orderErr) {
             const msg = orderErr instanceof Error ? orderErr.message : String(orderErr);
             state.lastError = msg;
-            logger.error({ err: msg, ticker, side: tradeSide, priceInCents, contractCount }, "Order failed — market marked as done, will not retry");
+            logger.error({ err: msg, ticker, side: tradeSide, priceInCents, contractCount }, "Order failed — will retry next check");
           }
         }
       }
