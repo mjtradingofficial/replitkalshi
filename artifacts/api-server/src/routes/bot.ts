@@ -3,6 +3,7 @@ import {
   getBotState,
   startBot,
   stopBot,
+  type StopLossTier,
 } from "../lib/kalshi-bot";
 
 const router: IRouter = Router();
@@ -19,7 +20,8 @@ router.get("/bot/status", (_req, res) => {
     totalTrades: state.totalTrades,
     tradedMarkets: state.tradedMarkets,
     openPositions: state.openPositions,
-    stopLossPrice: state.stopLossPrice,
+    useStopLoss: state.useStopLoss,
+    stopLossTiers: state.stopLossTiers,
     totalPnlCents: state.totalPnlCents,
     winCount: state.winCount,
     lossCount: state.lossCount,
@@ -38,15 +40,27 @@ router.get("/bot/trades", (_req, res) => {
 });
 
 router.post("/bot/start", (req, res) => {
-  const {
-    tradeSize,
-    threshold,
-    windowSeconds,
-    checkIntervalMs,
-    stopLossPrice,
-  } = req.body as Record<string, number | undefined>;
+  const body = req.body as {
+    tradeSize?: number;
+    thresholdCents?: number;
+    windowSeconds?: number;
+    checkIntervalMs?: number;
+    useStopLoss?: boolean;
+    stopLossTiers?: StopLossTier[];
+  };
 
-  startBot({ tradeSize, threshold, windowSeconds, checkIntervalMs, stopLossPrice })
+  const threshold = body.thresholdCents != null
+    ? body.thresholdCents / 100
+    : undefined;
+
+  startBot({
+    tradeSize: body.tradeSize,
+    threshold,
+    windowSeconds: body.windowSeconds,
+    checkIntervalMs: body.checkIntervalMs,
+    useStopLoss: body.useStopLoss,
+    stopLossTiers: body.stopLossTiers,
+  })
     .then(() => {
       res.json({ success: true, message: "Bot started" });
     })

@@ -16,6 +16,11 @@ function loadPrivateKey(secret: string): crypto.KeyObject {
 export type BotStatus = "idle" | "running" | "stopped" | "error";
 export type TradeAction = "buy" | "stop-loss-sell";
 
+export interface StopLossTier {
+  priceCents: number;
+  fraction: number;
+}
+
 export interface Trade {
   id: string;
   ticker: string;
@@ -33,8 +38,7 @@ export interface Position {
   totalCount: number;
   remaining: number;
   boughtAt: number;
-  tier1Triggered: boolean;
-  tier2Triggered: boolean;
+  triggeredTiers: boolean[];
   stopLossPnlCents: number;
 }
 
@@ -69,7 +73,8 @@ export interface BotState {
   tradedMarkets: string[];
   openPositions: Position[];
   settlements: Settlement[];
-  stopLossPrice: number;
+  useStopLoss: boolean;
+  stopLossTiers: StopLossTier[];
   lastError: string | null;
   lastPollAt: string | null;
   totalTrades: number;
@@ -77,6 +82,12 @@ export interface BotState {
   winCount: number;
   lossCount: number;
 }
+
+export const DEFAULT_STOP_LOSS_TIERS: StopLossTier[] = [
+  { priceCents: 90, fraction: 0.333 },
+  { priceCents: 87, fraction: 0.333 },
+  { priceCents: 85, fraction: 1 },
+];
 
 // --- Database persistence ---
 
@@ -257,7 +268,8 @@ const state: BotState = {
   tradedMarkets: [],
   openPositions: [],
   settlements: [],
-  stopLossPrice: 0.80,
+  useStopLoss: true,
+  stopLossTiers: DEFAULT_STOP_LOSS_TIERS,
   lastError: null,
   lastPollAt: null,
   totalTrades: 0,
@@ -274,6 +286,7 @@ export function getBotState(): BotState {
     trades: [...state.trades],
     openPositions: [...state.openPositions],
     settlements: [...state.settlements],
+    stopLossTiers: [...state.stopLossTiers],
   };
 }
 
@@ -423,6 +436,8 @@ async function runLoop(
   threshold: number,
   windowSeconds: number,
   checkIntervalMs: number,
+  useStopLoss: boolean,
+  stopLossTiers: StopLossTier[],
 ): Promise<void> {
   let displayRefreshTick = 0;
   const DISPLAY_REFRESH_EVERY = 10;
@@ -441,87 +456,106 @@ async function runLoop(
         timeLeftSeconds: (new Date(m.close_time).getTime() - now.getTime()) / 1000,
       }));
 
-      // --- Tiered stop loss: 1/3 at 90c, 1/3 at 87c, all remaining at 85c ---
-      for (const pos of [...state.openPositions]) {
-        const mkt = withTiming.find((w) => w.market.ticker === pos.ticker);
+      // --- Stop loss monitoring ---
+      if (useStopLoss && stopLossTiers.length > 0) {
+        for (const pos of [...state.openPositions]) {
+          const mkt = withTiming.find((w) => w.market.ticker === pos.ticker);
 
-        if (!mkt || mkt.timeLeftSeconds <= 0) {
-          state.openPositions = state.openPositions.filter(
-            (p) => p.ticker !== pos.ticker,
-          );
-          logger.info({ ticker: pos.ticker }, "Position expired — fetching settlement result");
-          void settlePosition(pos);
-          continue;
-        }
-
-        if (pos.remaining <= 0) continue;
-
-        try {
-          const { yesPrice, noPrice } = await getOrderbookPrices(pos.ticker);
-          const currentPrice = pos.side === "yes" ? yesPrice : noPrice;
-          if (currentPrice === null) continue;
-
-          const fireSell = async (count: number, label: string) => {
-            const sellPriceInCents = Math.max(1, Math.floor(currentPrice * 100));
-            logger.warn(
-              { ticker: pos.ticker, side: pos.side, currentPrice, count, label },
-              `Stop loss ${label} triggered`,
+          if (!mkt || mkt.timeLeftSeconds <= 0) {
+            state.openPositions = state.openPositions.filter(
+              (p) => p.ticker !== pos.ticker,
             );
-            const sellBody = {
-              ticker: pos.ticker,
-              action: "sell",
-              side: pos.side,
-              type: "limit",
-              count,
-              ...(pos.side === "yes"
-                ? { yes_price: sellPriceInCents }
-                : { no_price: sellPriceInCents }),
-            };
-            try {
-              const response = await kalshiPost<unknown>("/portfolio/orders", sellBody, apiKey, privateKey);
-              const sellTrade: Trade = {
-                id: `${pos.ticker}-${pos.side}-sell-${Date.now()}`,
+            logger.info({ ticker: pos.ticker }, "Position expired — fetching settlement result");
+            void settlePosition(pos);
+            continue;
+          }
+
+          if (pos.remaining <= 0) continue;
+
+          try {
+            const { yesPrice, noPrice } = await getOrderbookPrices(pos.ticker);
+            const currentPrice = pos.side === "yes" ? yesPrice : noPrice;
+            if (currentPrice === null) continue;
+
+            const fireSell = async (count: number, label: string) => {
+              const sellPriceInCents = Math.max(1, Math.floor(currentPrice * 100));
+              logger.warn(
+                { ticker: pos.ticker, side: pos.side, currentPrice, count, label },
+                `Stop loss ${label} triggered`,
+              );
+              const sellBody = {
                 ticker: pos.ticker,
+                action: "sell",
                 side: pos.side,
-                action: "stop-loss-sell",
-                price: currentPrice,
+                type: "limit",
                 count,
-                timestamp: new Date().toISOString(),
-                response,
+                ...(pos.side === "yes"
+                  ? { yes_price: sellPriceInCents }
+                  : { no_price: sellPriceInCents }),
               };
-              recordTrade(sellTrade);
-              state.totalTrades += 1;
-              pos.remaining -= count;
-              const buyPriceCents = Math.round(pos.boughtAt * 100);
-              pos.stopLossPnlCents += (sellPriceInCents - buyPriceCents) * count;
-              logger.info({ sellTrade, remainingAfter: pos.remaining, stopLossPnlCents: pos.stopLossPnlCents }, `Stop loss ${label} sell placed`);
-            } catch (sellErr) {
-              const msg = sellErr instanceof Error ? sellErr.message : String(sellErr);
-              logger.error({ err: msg, label, count }, `Stop loss ${label} sell failed`);
+              try {
+                const response = await kalshiPost<unknown>("/portfolio/orders", sellBody, apiKey, privateKey);
+                const sellTrade: Trade = {
+                  id: `${pos.ticker}-${pos.side}-sell-${Date.now()}`,
+                  ticker: pos.ticker,
+                  side: pos.side,
+                  action: "stop-loss-sell",
+                  price: currentPrice,
+                  count,
+                  timestamp: new Date().toISOString(),
+                  response,
+                };
+                recordTrade(sellTrade);
+                state.totalTrades += 1;
+                pos.remaining -= count;
+                const buyPriceCents = Math.round(pos.boughtAt * 100);
+                pos.stopLossPnlCents += (sellPriceInCents - buyPriceCents) * count;
+                logger.info({ sellTrade, remainingAfter: pos.remaining, stopLossPnlCents: pos.stopLossPnlCents }, `Stop loss ${label} sell placed`);
+              } catch (sellErr) {
+                const msg = sellErr instanceof Error ? sellErr.message : String(sellErr);
+                logger.error({ err: msg, label, count }, `Stop loss ${label} sell failed`);
+              }
+            };
+
+            for (let i = 0; i < stopLossTiers.length; i++) {
+              const tier = stopLossTiers[i];
+              const isLastTier = i === stopLossTiers.length - 1;
+
+              if (!pos.triggeredTiers[i] && currentPrice <= tier.priceCents / 100) {
+                pos.triggeredTiers[i] = true;
+                let toSell: number;
+                if (isLastTier) {
+                  toSell = pos.remaining;
+                } else {
+                  toSell = Math.min(
+                    Math.max(1, Math.floor(pos.totalCount * tier.fraction)),
+                    pos.remaining,
+                  );
+                }
+                if (toSell > 0) {
+                  await fireSell(toSell, `T${i + 1}@${tier.priceCents}¢`);
+                }
+              }
             }
-          };
 
-          if (!pos.tier1Triggered && currentPrice <= 0.90) {
-            pos.tier1Triggered = true;
-            const toSell = Math.max(1, Math.floor(pos.totalCount / 3));
-            await fireSell(Math.min(toSell, pos.remaining), "T1@0.90");
+            if (pos.remaining <= 0) {
+              state.openPositions = state.openPositions.filter((p) => p.ticker !== pos.ticker);
+            }
+          } catch {
+            // ignore price fetch error for this position tick
           }
-
-          if (!pos.tier2Triggered && currentPrice <= 0.87) {
-            pos.tier2Triggered = true;
-            const toSell = Math.max(1, Math.floor(pos.totalCount / 3));
-            await fireSell(Math.min(toSell, pos.remaining), "T2@0.87");
+        }
+      } else {
+        // No stop loss — still need to detect expiry
+        for (const pos of [...state.openPositions]) {
+          const mkt = withTiming.find((w) => w.market.ticker === pos.ticker);
+          if (!mkt || mkt.timeLeftSeconds <= 0) {
+            state.openPositions = state.openPositions.filter(
+              (p) => p.ticker !== pos.ticker,
+            );
+            logger.info({ ticker: pos.ticker }, "Position expired — fetching settlement result");
+            void settlePosition(pos);
           }
-
-          if (pos.tier1Triggered && pos.tier2Triggered && currentPrice <= 0.85 && pos.remaining > 0) {
-            await fireSell(pos.remaining, "T3@0.85");
-          }
-
-          if (pos.remaining <= 0) {
-            state.openPositions = state.openPositions.filter((p) => p.ticker !== pos.ticker);
-          }
-        } catch {
-          // ignore price fetch error for this position tick
         }
       }
 
@@ -682,8 +716,7 @@ async function runLoop(
               totalCount: contractCount,
               remaining: contractCount,
               boughtAt: tradePrice,
-              tier1Triggered: false,
-              tier2Triggered: false,
+              triggeredTiers: new Array(stopLossTiers.length).fill(false),
               stopLossPnlCents: 0,
             });
 
@@ -718,7 +751,8 @@ export interface BotConfig {
   threshold?: number;
   windowSeconds?: number;
   checkIntervalMs?: number;
-  stopLossPrice?: number;
+  useStopLoss?: boolean;
+  stopLossTiers?: StopLossTier[];
 }
 
 export async function startBot(config: BotConfig = {}): Promise<void> {
@@ -741,20 +775,21 @@ export async function startBot(config: BotConfig = {}): Promise<void> {
     threshold = 0.97,
     windowSeconds = 180,
     checkIntervalMs = 500,
-    stopLossPrice = 0.80,
+    useStopLoss = true,
+    stopLossTiers = DEFAULT_STOP_LOSS_TIERS,
   } = config;
 
-  // Load all historical data from DB before starting
   await initializeFromDb();
 
   stopRequested = false;
   state.status = "running";
   state.startedAt = new Date().toISOString();
   state.lastError = null;
-  state.stopLossPrice = stopLossPrice;
+  state.useStopLoss = useStopLoss;
+  state.stopLossTiers = stopLossTiers;
 
   logger.info(
-    { tradeSize, threshold, windowSeconds, checkIntervalMs, stopLossPrice },
+    { tradeSize, threshold, windowSeconds, checkIntervalMs, useStopLoss, stopLossTiers },
     "Starting Kalshi BTC15M bot (RSA-PSS auth)",
   );
 
@@ -765,6 +800,8 @@ export async function startBot(config: BotConfig = {}): Promise<void> {
     threshold,
     windowSeconds,
     checkIntervalMs,
+    useStopLoss,
+    stopLossTiers,
   ).catch((err) => {
     state.status = "error";
     state.lastError = err instanceof Error ? err.message : String(err);

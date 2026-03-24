@@ -42,6 +42,13 @@ export interface Settlement {
   settledAt: string;
 }
 
+export interface StopLossTier {
+  /** Trigger price in cents (e.g. 90 = $0.90) */
+  priceCents: number;
+  /** Fraction of total position to sell at this tier (e.g. 0.333 = 1/3) */
+  fraction: number;
+}
+
 export interface BotStatus {
   status: BotStatusStatus;
   startedAt: string | null;
@@ -54,6 +61,8 @@ export interface BotStatus {
   winCount: number;
   lossCount: number;
   accuracy: number | null;
+  useStopLoss: boolean;
+  stopLossTiers: StopLossTier[];
 }
 
 export type TradeSide = (typeof TradeSide)[keyof typeof TradeSide];
@@ -77,14 +86,18 @@ export interface TradeList {
 }
 
 export interface BotStartConfig {
-  /** Number of contracts to buy per trade */
+  /** Number of contracts to buy per trade (fallback only; bot uses max affordable) */
   tradeSize?: number;
-  /** Price threshold in cents (e.g. 99 = $0.99) */
+  /** Price threshold in cents (e.g. 97 = $0.97) */
   thresholdCents?: number;
-  /** Seconds before expiry to start watching */
+  /** Seconds before expiry to start watching the market */
   windowSeconds?: number;
   /** Polling interval in milliseconds */
   checkIntervalMs?: number;
+  /** Whether to enable stop loss selling */
+  useStopLoss?: boolean;
+  /** Ordered stop loss tiers (last tier always sells all remaining) */
+  stopLossTiers?: StopLossTier[];
 }
 
 export interface BotActionResponse {
