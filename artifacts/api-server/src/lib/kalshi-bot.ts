@@ -645,15 +645,8 @@ async function runLoop(
             logger.info({ trade }, "Order placed successfully");
           } catch (orderErr) {
             const msg = orderErr instanceof Error ? orderErr.message : String(orderErr);
-            // 409 market_closed = market expired mid-flight; mark done and skip cleanly
-            if (msg.includes("market_closed") || msg.includes("409")) {
-              state.tradedMarkets.push(ticker);
-              state.lastError = null;
-              logger.warn({ ticker, msg }, "Market closed before order landed — skipping");
-            } else {
-              state.lastError = msg;
-              logger.error({ err: msg, ticker, side: tradeSide, priceInCents, contractCount }, "Order failed — will retry next check");
-            }
+            state.lastError = msg;
+            logger.error({ err: msg, ticker, side: tradeSide, priceInCents, contractCount }, "Order failed — will retry next check");
           }
         }
       }
