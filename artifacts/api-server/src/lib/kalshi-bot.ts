@@ -46,6 +46,8 @@ export interface BotState {
   totalTrades: number;
 }
 
+const API_PATH_PREFIX = "/trade-api/v2";
+
 function signRequest(
   method: string,
   path: string,
@@ -54,7 +56,9 @@ function signRequest(
   privateKey: crypto.KeyObject,
 ): Record<string, string> {
   const timestamp = String(Date.now());
-  const message = timestamp + method + path + body;
+  // Kalshi requires the full path including /trade-api/v2 in the signed message
+  const fullPath = API_PATH_PREFIX + path;
+  const message = timestamp + method + fullPath + body;
   // Kalshi Elections API: RSA-PSS with SHA-256, salt length = 32 (digest size)
   const signature = crypto
     .sign("sha256", Buffer.from(message), {
