@@ -107,7 +107,8 @@ async function kalshiPost<T>(
 
 interface KalshiMarket {
   ticker: string;
-  expiration_time: string;
+  close_time: string;      // when trading CLOSES (15 min after open) — use this for countdown
+  expiration_time: string; // when the contract settles (7 days later) — not used for timing
   status: string;
 }
 
@@ -204,13 +205,15 @@ async function runLoop(
       const markets = await fetchOpenBtc15mMarkets();
       const now = new Date();
 
-      // Sort by time left ascending — find any market in the window
-      const inWindow = markets
-        .map((m) => ({
-          market: m,
-          expiry: new Date(m.expiration_time),
-          timeLeftSeconds: (new Date(m.expiration_time).getTime() - now.getTime()) / 1000,
-        }))
+      // Use close_time (end of 15-min trading window) for countdown — NOT expiration_time (7 days)
+      const withTiming = markets.map((m) => ({
+        market: m,
+        closeAt: new Date(m.close_time),
+        timeLeftSeconds: (new Date(m.close_time).getTime() - now.getTime()) / 1000,
+      }));
+
+      // Markets in the trigger window: trading closes within windowSeconds, hasn't been traded
+      const inWindow = withTiming
         .filter(
           ({ timeLeftSeconds, market }) =>
             timeLeftSeconds > 0 &&
@@ -219,18 +222,12 @@ async function runLoop(
         )
         .sort((a, b) => a.timeLeftSeconds - b.timeLeftSeconds);
 
-      // Update currentMarket to the nearest expiring one (even outside window, for display)
-      const nearest = markets
-        .map((m) => ({
-          market: m,
-          expiry: new Date(m.expiration_time),
-          timeLeftSeconds: (new Date(m.expiration_time).getTime() - now.getTime()) / 1000,
-        }))
+      // Nearest market by close_time (for dashboard display, including those outside the window)
+      const nearest = withTiming
         .filter(({ timeLeftSeconds }) => timeLeftSeconds > 0)
         .sort((a, b) => a.timeLeftSeconds - b.timeLeftSeconds)[0];
 
       if (nearest) {
-        // Always fetch the nearest market's price for dashboard display
         let displayYes = state.currentMarket?.ticker === nearest.market.ticker
           ? state.currentMarket.yesPrice
           : null;
@@ -256,7 +253,7 @@ async function runLoop(
 
         state.currentMarket = {
           ticker: nearest.market.ticker,
-          expirationTime: nearest.expiry.toISOString(),
+          expirationTime: nearest.closeAt.toISOString(),
           timeLeftSeconds: Math.max(0, nearest.timeLeftSeconds),
           yesPrice: displayYes,
           noPrice: displayNo,
