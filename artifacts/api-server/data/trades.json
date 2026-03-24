@@ -1,0 +1,37 @@
+[
+  {
+    "id": "KXBTC15M-26MAR232315-15-yes-1774322035067",
+    "ticker": "KXBTC15M-26MAR232315-15",
+    "side": "yes",
+    "action": "buy",
+    "price": 0.97,
+    "count": 12,
+    "timestamp": "2026-03-24T03:13:55.068Z",
+    "response": {
+      "order": {
+        "action": "buy",
+        "client_order_id": "",
+        "created_time": "2026-03-24T03:13:55.036064Z",
+        "expiration_time": null,
+        "fill_count_fp": "0.00",
+        "initial_count_fp": "12.00",
+        "last_update_time": "2026-03-24T03:13:55.036064Z",
+        "maker_fees_dollars": "0.0000",
+        "maker_fill_cost_dollars": "0.0000",
+        "no_price_dollars": "0.0300",
+        "order_group_id": null,
+        "order_id": "cf04596d-08d5-4fa1-b468-b195bd9ac545",
+        "remaining_count_fp": "12.00",
+        "side": "yes",
+        "status": "resting",
+        "subaccount_number": 0,
+        "taker_fees_dollars": "0.0000",
+        "taker_fill_cost_dollars": "0.0000",
+        "ticker": "KXBTC15M-26MAR232315-15",
+        "type": "limit",
+        "user_id": "fe7589e8-0368-4e44-976b-01657d2ac514",
+        "yes_price_dollars": "0.9700"
+      }
+    }
+  }
+]

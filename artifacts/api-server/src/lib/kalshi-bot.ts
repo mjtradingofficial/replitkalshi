@@ -32,8 +32,12 @@ export interface Trade {
 export interface Position {
   ticker: string;
   side: "yes" | "no";
-  count: number;
+  totalCount: number;    // original contract count when bought
+  remaining: number;     // contracts still held (decreases as tiers fire)
   boughtAt: number;
+  tier1Triggered: boolean; // 90c — sold 1/3
+  tier2Triggered: boolean; // 87c — sold 1/3 more
+  // tier 3 (85c) sells all remaining
 }
 
 export interface MarketInfo {
@@ -163,17 +167,19 @@ interface KalshiOrderbookFp {
   };
 }
 
+const _persistedTrades = loadTrades();
+
 const state: BotState = {
   status: "idle",
   startedAt: null,
   currentMarket: null,
-  trades: loadTrades(),
+  trades: _persistedTrades,
   tradedMarkets: [],
   openPositions: [],
   stopLossPrice: 0.80,
   lastError: null,
   lastPollAt: null,
-  totalTrades: 0,
+  totalTrades: _persistedTrades.length,
 };
 
 let stopRequested = false;
@@ -259,7 +265,7 @@ async function runLoop(
         timeLeftSeconds: (new Date(m.close_time).getTime() - now.getTime()) / 1000,
       }));
 
-      // --- Stop loss check: monitor all open positions ---
+      // --- Tiered stop loss: 1/3 at 90c, 1/3 at 87c, all remaining at 85c ---
       for (const pos of [...state.openPositions]) {
         const mkt = withTiming.find((w) => w.market.ticker === pos.ticker);
 
@@ -272,58 +278,74 @@ async function runLoop(
           continue;
         }
 
-        // Check current price of the side we hold
+        if (pos.remaining <= 0) continue;
+
         try {
           const { yesPrice, noPrice } = await getOrderbookPrices(pos.ticker);
           const currentPrice = pos.side === "yes" ? yesPrice : noPrice;
+          if (currentPrice === null) continue;
 
-          if (currentPrice !== null && currentPrice <= state.stopLossPrice) {
+          // Helper: fire a partial sell for this position
+          const fireSell = async (count: number, label: string) => {
             const sellPriceInCents = Math.max(1, Math.floor(currentPrice * 100));
             logger.warn(
-              { ticker: pos.ticker, side: pos.side, currentPrice, stopLossPrice: state.stopLossPrice, sellPriceInCents },
-              "Stop loss triggered — selling position",
+              { ticker: pos.ticker, side: pos.side, currentPrice, count, label },
+              `Stop loss ${label} triggered`,
             );
-
             const sellBody = {
               ticker: pos.ticker,
               action: "sell",
               side: pos.side,
               type: "limit",
-              count: pos.count,
+              count,
               ...(pos.side === "yes"
                 ? { yes_price: sellPriceInCents }
                 : { no_price: sellPriceInCents }),
             };
-
             try {
-              const response = await kalshiPost<unknown>(
-                "/portfolio/orders",
-                sellBody,
-                apiKey,
-                privateKey,
-              );
-
+              const response = await kalshiPost<unknown>("/portfolio/orders", sellBody, apiKey, privateKey);
               const sellTrade: Trade = {
                 id: `${pos.ticker}-${pos.side}-sell-${Date.now()}`,
                 ticker: pos.ticker,
                 side: pos.side,
                 action: "stop-loss-sell",
                 price: currentPrice,
-                count: pos.count,
+                count,
                 timestamp: new Date().toISOString(),
                 response,
               };
-
               recordTrade(sellTrade);
               state.totalTrades += 1;
-              state.openPositions = state.openPositions.filter(
-                (p) => p.ticker !== pos.ticker,
-              );
-              logger.info({ sellTrade }, "Stop loss sell placed successfully");
+              pos.remaining -= count;
+              logger.info({ sellTrade, remainingAfter: pos.remaining }, `Stop loss ${label} sell placed`);
             } catch (sellErr) {
               const msg = sellErr instanceof Error ? sellErr.message : String(sellErr);
-              logger.error({ err: msg, pos }, "Stop loss sell order failed");
+              logger.error({ err: msg, label, count }, `Stop loss ${label} sell failed`);
             }
+          };
+
+          // Tier 1: price ≤ $0.90 → sell first 1/3
+          if (!pos.tier1Triggered && currentPrice <= 0.90) {
+            pos.tier1Triggered = true;
+            const toSell = Math.max(1, Math.floor(pos.totalCount / 3));
+            await fireSell(Math.min(toSell, pos.remaining), "T1@0.90");
+          }
+
+          // Tier 2: price ≤ $0.87 → sell another 1/3
+          if (!pos.tier2Triggered && currentPrice <= 0.87) {
+            pos.tier2Triggered = true;
+            const toSell = Math.max(1, Math.floor(pos.totalCount / 3));
+            await fireSell(Math.min(toSell, pos.remaining), "T2@0.87");
+          }
+
+          // Tier 3: price ≤ $0.85 → sell everything remaining
+          if (pos.tier1Triggered && pos.tier2Triggered && currentPrice <= 0.85 && pos.remaining > 0) {
+            await fireSell(pos.remaining, "T3@0.85");
+          }
+
+          // Clean up fully exited positions
+          if (pos.remaining <= 0) {
+            state.openPositions = state.openPositions.filter((p) => p.ticker !== pos.ticker);
           }
         } catch {
           // ignore price fetch error for this position tick
@@ -480,12 +502,15 @@ async function runLoop(
             state.tradedMarkets.push(ticker);
             state.totalTrades += 1;
 
-            // Track this as an open position for stop loss monitoring
+            // Track this as an open position for tiered stop loss monitoring
             state.openPositions.push({
               ticker,
               side: tradeSide,
-              count: contractCount,
+              totalCount: contractCount,
+              remaining: contractCount,
               boughtAt: tradePrice,
+              tier1Triggered: false,
+              tier2Triggered: false,
             });
 
             logger.info({ trade }, "Order placed successfully");
