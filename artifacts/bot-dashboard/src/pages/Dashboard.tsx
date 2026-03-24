@@ -5,6 +5,7 @@ import { StatusCard } from "@/components/StatusCard";
 import { MarketCard } from "@/components/MarketCard";
 import { TradeHistory } from "@/components/TradeHistory";
 import { DashboardStats } from "@/components/DashboardStats";
+import { SettlementHistory } from "@/components/SettlementHistory";
 
 export default function Dashboard() {
   return (
@@ -57,6 +58,7 @@ export default function Dashboard() {
             className="lg:col-span-8"
           >
             <TradeHistory />
+          <SettlementHistory />
           </motion.div>
         </div>
       </main>

@@ -5,6 +5,7 @@ import { logger } from "./logger";
 
 const BASE_URL = "https://api.elections.kalshi.com/trade-api/v2";
 const TRADES_FILE = path.resolve("./data/trades.json");
+const SETTLEMENTS_FILE = path.resolve("./data/settlements.json");
 
 function loadPrivateKey(secret: string): crypto.KeyObject {
   const cleanBase64 = secret.replace(/\s+/g, "");
@@ -32,12 +33,27 @@ export interface Trade {
 export interface Position {
   ticker: string;
   side: "yes" | "no";
-  totalCount: number;    // original contract count when bought
-  remaining: number;     // contracts still held (decreases as tiers fire)
+  totalCount: number;
+  remaining: number;
   boughtAt: number;
-  tier1Triggered: boolean; // 90c — sold 1/3
-  tier2Triggered: boolean; // 87c — sold 1/3 more
-  // tier 3 (85c) sells all remaining
+  tier1Triggered: boolean;
+  tier2Triggered: boolean;
+  stopLossPnlCents: number; // running PnL from stop-loss sells (negative = loss)
+}
+
+export interface Settlement {
+  ticker: string;
+  side: "yes" | "no";
+  result: "yes" | "no";
+  won: boolean;
+  buyPriceCents: number;
+  totalBought: number;
+  soldViaStopLoss: number;
+  settledCount: number;
+  stopLossPnlCents: number;
+  settlementPnlCents: number;
+  totalPnlCents: number;
+  settledAt: string;
 }
 
 export interface MarketInfo {
@@ -55,10 +71,14 @@ export interface BotState {
   trades: Trade[];
   tradedMarkets: string[];
   openPositions: Position[];
+  settlements: Settlement[];
   stopLossPrice: number;
   lastError: string | null;
   lastPollAt: string | null;
   totalTrades: number;
+  totalPnlCents: number;
+  winCount: number;
+  lossCount: number;
 }
 
 // --- Trade persistence ---
@@ -80,6 +100,27 @@ function saveTrades(trades: Trade[]): void {
     fs.writeFileSync(TRADES_FILE, JSON.stringify(trades, null, 2));
   } catch (err) {
     logger.warn({ err }, "Failed to persist trades");
+  }
+}
+
+function loadSettlements(): Settlement[] {
+  try {
+    if (fs.existsSync(SETTLEMENTS_FILE)) {
+      const raw = fs.readFileSync(SETTLEMENTS_FILE, "utf-8");
+      return JSON.parse(raw) as Settlement[];
+    }
+  } catch {
+    // ignore
+  }
+  return [];
+}
+
+function saveSettlements(settlements: Settlement[]): void {
+  try {
+    fs.mkdirSync(path.dirname(SETTLEMENTS_FILE), { recursive: true });
+    fs.writeFileSync(SETTLEMENTS_FILE, JSON.stringify(settlements, null, 2));
+  } catch (err) {
+    logger.warn({ err }, "Failed to persist settlements");
   }
 }
 
@@ -168,18 +209,32 @@ interface KalshiOrderbookFp {
 }
 
 const _persistedTrades = loadTrades();
+const _persistedSettlements = loadSettlements();
+
+// Derive unique markets from persisted buy trades
+const _persistedTradedMarkets = [
+  ...new Set(
+    _persistedTrades
+      .filter((t) => t.action === "buy")
+      .map((t) => t.ticker),
+  ),
+];
 
 const state: BotState = {
   status: "idle",
   startedAt: null,
   currentMarket: null,
   trades: _persistedTrades,
-  tradedMarkets: [],
+  tradedMarkets: _persistedTradedMarkets,
   openPositions: [],
+  settlements: _persistedSettlements,
   stopLossPrice: 0.80,
   lastError: null,
   lastPollAt: null,
   totalTrades: _persistedTrades.length,
+  totalPnlCents: _persistedSettlements.reduce((s, x) => s + x.totalPnlCents, 0),
+  winCount: _persistedSettlements.filter((x) => x.won).length,
+  lossCount: _persistedSettlements.filter((x) => !x.won).length,
 };
 
 let stopRequested = false;
@@ -189,7 +244,76 @@ export function getBotState(): BotState {
     ...state,
     trades: [...state.trades],
     openPositions: [...state.openPositions],
+    settlements: [...state.settlements],
   };
+}
+
+async function fetchMarketResult(
+  ticker: string,
+): Promise<"yes" | "no" | null> {
+  const data = await kalshiPublicGet<{ market: { result: string | null } }>(
+    `/markets/${ticker}`,
+  );
+  const r = data?.market?.result;
+  if (r === "yes" || r === "no") return r;
+  return null;
+}
+
+async function settlePosition(pos: Position): Promise<void> {
+  // Retry fetching the result a few times — settlements can lag a few seconds
+  let result: "yes" | "no" | null = null;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      result = await fetchMarketResult(pos.ticker);
+      if (result) break;
+    } catch (err) {
+      logger.warn({ err, attempt }, "Failed to fetch market result, retrying");
+    }
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+
+  if (!result) {
+    logger.warn({ ticker: pos.ticker }, "Could not determine market result after retries");
+    return;
+  }
+
+  const won = result === pos.side;
+  const buyPriceCents = Math.round(pos.boughtAt * 100);
+  const soldViaStopLoss = pos.totalCount - pos.remaining;
+  const settledCount = pos.remaining;
+
+  const settlementPnlCents = won
+    ? (100 - buyPriceCents) * settledCount
+    : -buyPriceCents * settledCount;
+
+  const totalPnlCents = pos.stopLossPnlCents + settlementPnlCents;
+
+  const settlement: Settlement = {
+    ticker: pos.ticker,
+    side: pos.side,
+    result,
+    won,
+    buyPriceCents,
+    totalBought: pos.totalCount,
+    soldViaStopLoss,
+    settledCount,
+    stopLossPnlCents: pos.stopLossPnlCents,
+    settlementPnlCents,
+    totalPnlCents,
+    settledAt: new Date().toISOString(),
+  };
+
+  state.settlements.unshift(settlement);
+  state.totalPnlCents += totalPnlCents;
+  if (won) state.winCount += 1;
+  else state.lossCount += 1;
+
+  saveSettlements(state.settlements);
+
+  logger.info(
+    { ticker: pos.ticker, result, won, totalPnlCents, settlementPnlCents, stopLossPnlCents: pos.stopLossPnlCents },
+    "Position settled",
+  );
 }
 
 async function fetchOpenBtc15mMarkets(): Promise<KalshiMarket[]> {
@@ -269,12 +393,13 @@ async function runLoop(
       for (const pos of [...state.openPositions]) {
         const mkt = withTiming.find((w) => w.market.ticker === pos.ticker);
 
-        // Market expired — position settled, remove it
+        // Market expired — fetch result and record PnL, then remove position
         if (!mkt || mkt.timeLeftSeconds <= 0) {
           state.openPositions = state.openPositions.filter(
             (p) => p.ticker !== pos.ticker,
           );
-          logger.info({ ticker: pos.ticker }, "Position expired/settled, removed");
+          logger.info({ ticker: pos.ticker }, "Position expired — fetching settlement result");
+          void settlePosition(pos); // fire-and-forget with internal retry
           continue;
         }
 
@@ -317,7 +442,10 @@ async function runLoop(
               recordTrade(sellTrade);
               state.totalTrades += 1;
               pos.remaining -= count;
-              logger.info({ sellTrade, remainingAfter: pos.remaining }, `Stop loss ${label} sell placed`);
+              // Accumulate stop-loss PnL: (sell - buy) * count in cents
+              const buyPriceCents = Math.round(pos.boughtAt * 100);
+              pos.stopLossPnlCents += (sellPriceInCents - buyPriceCents) * count;
+              logger.info({ sellTrade, remainingAfter: pos.remaining, stopLossPnlCents: pos.stopLossPnlCents }, `Stop loss ${label} sell placed`);
             } catch (sellErr) {
               const msg = sellErr instanceof Error ? sellErr.message : String(sellErr);
               logger.error({ err: msg, label, count }, `Stop loss ${label} sell failed`);
@@ -511,6 +639,7 @@ async function runLoop(
               boughtAt: tradePrice,
               tier1Triggered: false,
               tier2Triggered: false,
+              stopLossPnlCents: 0,
             });
 
             logger.info({ trade }, "Order placed successfully");

@@ -27,6 +27,21 @@ export const BotStatusStatus = {
   error: "error",
 } as const;
 
+export interface Settlement {
+  ticker: string;
+  side: "yes" | "no";
+  result: "yes" | "no";
+  won: boolean;
+  buyPriceCents: number;
+  totalBought: number;
+  soldViaStopLoss: number;
+  settledCount: number;
+  stopLossPnlCents: number;
+  settlementPnlCents: number;
+  totalPnlCents: number;
+  settledAt: string;
+}
+
 export interface BotStatus {
   status: BotStatusStatus;
   startedAt: string | null;
@@ -35,6 +50,10 @@ export interface BotStatus {
   lastError: string | null;
   totalTrades: number;
   tradedMarkets: string[];
+  totalPnlCents: number;
+  winCount: number;
+  lossCount: number;
+  accuracy: number | null;
 }
 
 export type TradeSide = (typeof TradeSide)[keyof typeof TradeSide];

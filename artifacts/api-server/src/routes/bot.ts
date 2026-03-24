@@ -9,6 +9,7 @@ const router: IRouter = Router();
 
 router.get("/bot/status", (_req, res) => {
   const state = getBotState();
+  const totalClosed = state.winCount + state.lossCount;
   res.json({
     status: state.status,
     startedAt: state.startedAt,
@@ -19,7 +20,16 @@ router.get("/bot/status", (_req, res) => {
     tradedMarkets: state.tradedMarkets,
     openPositions: state.openPositions,
     stopLossPrice: state.stopLossPrice,
+    totalPnlCents: state.totalPnlCents,
+    winCount: state.winCount,
+    lossCount: state.lossCount,
+    accuracy: totalClosed > 0 ? state.winCount / totalClosed : null,
   });
+});
+
+router.get("/bot/settlements", (_req, res) => {
+  const state = getBotState();
+  res.json({ settlements: state.settlements });
 });
 
 router.get("/bot/trades", (_req, res) => {
