@@ -32,7 +32,7 @@ export function StatusCard() {
   const [isConfigOpen, setIsConfigOpen] = useState(false);
   const [config, setConfig] = useState({
     tradeSize: 10,
-    thresholdCents: 99,
+    thresholdCents: 97,
     windowSeconds: 120,
     checkIntervalMs: 500
   });

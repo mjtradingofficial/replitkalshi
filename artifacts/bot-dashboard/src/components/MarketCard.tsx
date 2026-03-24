@@ -23,8 +23,8 @@ export function MarketCard() {
   }
 
   const isWindowActive = market.timeLeftSeconds < 120;
-  const highlightYes = market.yesPrice !== null && market.yesPrice >= 0.99;
-  const highlightNo = market.noPrice !== null && market.noPrice >= 0.99;
+  const highlightYes = market.yesPrice !== null && market.yesPrice >= 0.97;
+  const highlightNo = market.noPrice !== null && market.noPrice >= 0.97;
 
   return (
     <div className={cn(

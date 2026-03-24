@@ -197,7 +197,7 @@ async function runLoop(
       state.lastPollAt = new Date().toISOString();
       displayRefreshTick++;
 
-      const markets = await fetchOpenBtc15mMarkets(apiKey, privateKey);
+      const markets = await fetchOpenBtc15mMarkets();
       const now = new Date();
 
       // Sort by time left ascending — find any market in the window
@@ -242,11 +242,7 @@ async function runLoop(
 
         if (shouldRefreshDisplay) {
           try {
-            const prices = await getOrderbookPrices(
-              nearest.market.ticker,
-              apiKey,
-              privateKey,
-            );
+            const prices = await getOrderbookPrices(nearest.market.ticker);
             displayYes = prices.yesPrice;
             displayNo = prices.noPrice;
           } catch {
@@ -286,11 +282,7 @@ async function runLoop(
         if (stopRequested) break;
         const ticker = market.ticker;
 
-        const { yesPrice, noPrice } = await getOrderbookPrices(
-          ticker,
-          apiKey,
-          privateKey,
-        );
+        const { yesPrice, noPrice } = await getOrderbookPrices(ticker);
 
         // Update display if this is the nearest market
         if (state.currentMarket?.ticker === ticker) {
@@ -410,7 +402,7 @@ export function startBot(config: BotConfig = {}): void {
 
   const {
     tradeSize = 10,
-    threshold = 0.99,
+    threshold = 0.97,
     windowSeconds = 120,
     checkIntervalMs = 500,
   } = config;
