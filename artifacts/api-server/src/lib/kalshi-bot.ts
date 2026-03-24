@@ -85,6 +85,21 @@ async function kalshiPublicGet<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// Authenticated GET — used for private endpoints (balance, positions, orders)
+async function kalshiAuthGet<T>(
+  path: string,
+  apiKey: string,
+  privateKey: crypto.KeyObject,
+): Promise<T> {
+  const headers = signRequest("GET", path, "", apiKey, privateKey);
+  const res = await fetch(`${BASE_URL}${path}`, { headers });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Kalshi GET ${path} failed ${res.status}: ${text}`);
+  }
+  return res.json() as Promise<T>;
+}
+
 async function kalshiPost<T>(
   path: string,
   body: object,
@@ -317,20 +332,38 @@ async function runLoop(
         }
 
         if (tradeSide) {
+          // Fetch live balance and calculate max contracts we can afford
+          const priceInCents = Math.round(tradePrice * 100);
+          let contractCount = tradeSize; // fallback
+          try {
+            const balanceResp = await kalshiAuthGet<{ balance: number }>(
+              "/portfolio/balance",
+              apiKey,
+              privateKey,
+            );
+            // balance is in cents; price is in cents — buy as many as possible
+            const balanceCents = balanceResp.balance;
+            contractCount = Math.max(1, Math.floor(balanceCents / priceInCents));
+            logger.info(
+              { balanceCents, priceInCents, contractCount },
+              "Calculated max contracts from balance",
+            );
+          } catch (balErr) {
+            logger.warn({ err: balErr }, "Could not fetch balance, using fallback tradeSize");
+          }
+
           logger.info(
-            { ticker, side: tradeSide, price: tradePrice, count: tradeSize },
+            { ticker, side: tradeSide, price: tradePrice, count: contractCount },
             "Placing order",
           );
 
-          // Kalshi orders API: side determines which price field to include
-          // yes_price / no_price must be in CENTS (integer 1-99)
-          const priceInCents = Math.round(tradePrice * 100);
+          // yes_price / no_price in CENTS (integer 1-99); body NOT included in signature
           const orderBody = {
             ticker,
             action: "buy",
             side: tradeSide,
             type: "limit",
-            count: tradeSize,
+            count: contractCount,
             ...(tradeSide === "yes"
               ? { yes_price: priceInCents }
               : { no_price: priceInCents }),
@@ -348,7 +381,7 @@ async function runLoop(
             ticker,
             side: tradeSide,
             price: tradePrice,
-            count: tradeSize,
+            count: contractCount,
             timestamp: new Date().toISOString(),
             response,
           };
