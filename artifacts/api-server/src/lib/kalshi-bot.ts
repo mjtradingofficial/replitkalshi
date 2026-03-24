@@ -443,7 +443,7 @@ export function startBot(config: BotConfig = {}): void {
   const {
     tradeSize = 10,
     threshold = 0.97,
-    windowSeconds = 120,
+    windowSeconds = 180,
     checkIntervalMs = 500,
   } = config;
 
