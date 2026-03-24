@@ -46,13 +46,14 @@ router.post("/bot/start", (req, res) => {
     stopLossPrice,
   } = req.body as Record<string, number | undefined>;
 
-  try {
-    startBot({ tradeSize, threshold, windowSeconds, checkIntervalMs, stopLossPrice });
-    res.json({ success: true, message: "Bot started" });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    res.status(400).json({ success: false, message: msg });
-  }
+  startBot({ tradeSize, threshold, windowSeconds, checkIntervalMs, stopLossPrice })
+    .then(() => {
+      res.json({ success: true, message: "Bot started" });
+    })
+    .catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(400).json({ success: false, message: msg });
+    });
 });
 
 router.post("/bot/stop", (_req, res) => {

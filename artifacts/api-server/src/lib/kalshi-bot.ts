@@ -1,11 +1,8 @@
 import crypto from "crypto";
-import fs from "fs";
-import path from "path";
 import { logger } from "./logger";
+import { getPool } from "./db";
 
 const BASE_URL = "https://api.elections.kalshi.com/trade-api/v2";
-const TRADES_FILE = path.resolve("./data/trades.json");
-const SETTLEMENTS_FILE = path.resolve("./data/settlements.json");
 
 function loadPrivateKey(secret: string): crypto.KeyObject {
   const cleanBase64 = secret.replace(/\s+/g, "");
@@ -38,7 +35,7 @@ export interface Position {
   boughtAt: number;
   tier1Triggered: boolean;
   tier2Triggered: boolean;
-  stopLossPnlCents: number; // running PnL from stop-loss sells (negative = loss)
+  stopLossPnlCents: number;
 }
 
 export interface Settlement {
@@ -81,46 +78,90 @@ export interface BotState {
   lossCount: number;
 }
 
-// --- Trade persistence ---
-function loadTrades(): Trade[] {
-  try {
-    if (fs.existsSync(TRADES_FILE)) {
-      const raw = fs.readFileSync(TRADES_FILE, "utf-8");
-      return JSON.parse(raw) as Trade[];
-    }
-  } catch {
-    // ignore
-  }
-  return [];
-}
+// --- Database persistence ---
 
-function saveTrades(trades: Trade[]): void {
+async function dbLoadTrades(): Promise<Trade[]> {
   try {
-    fs.mkdirSync(path.dirname(TRADES_FILE), { recursive: true });
-    fs.writeFileSync(TRADES_FILE, JSON.stringify(trades, null, 2));
+    const pool = getPool();
+    const res = await pool.query<{
+      id: string; ticker: string; side: string; action: string;
+      price: number; count: number; timestamp: string; response: unknown;
+    }>(
+      "SELECT id, ticker, side, action, price, count, timestamp, response FROM trades ORDER BY timestamp DESC"
+    );
+    return res.rows.map((r) => ({
+      id: r.id,
+      ticker: r.ticker,
+      side: r.side as "yes" | "no",
+      action: r.action as TradeAction,
+      price: Number(r.price),
+      count: Number(r.count),
+      timestamp: new Date(r.timestamp).toISOString(),
+      response: r.response,
+    }));
   } catch (err) {
-    logger.warn({ err }, "Failed to persist trades");
+    logger.warn({ err }, "Failed to load trades from DB");
+    return [];
   }
 }
 
-function loadSettlements(): Settlement[] {
+async function dbSaveTrade(trade: Trade): Promise<void> {
   try {
-    if (fs.existsSync(SETTLEMENTS_FILE)) {
-      const raw = fs.readFileSync(SETTLEMENTS_FILE, "utf-8");
-      return JSON.parse(raw) as Settlement[];
-    }
-  } catch {
-    // ignore
-  }
-  return [];
-}
-
-function saveSettlements(settlements: Settlement[]): void {
-  try {
-    fs.mkdirSync(path.dirname(SETTLEMENTS_FILE), { recursive: true });
-    fs.writeFileSync(SETTLEMENTS_FILE, JSON.stringify(settlements, null, 2));
+    const pool = getPool();
+    await pool.query(
+      `INSERT INTO trades (id, ticker, side, action, price, count, timestamp, response)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (id) DO NOTHING`,
+      [trade.id, trade.ticker, trade.side, trade.action, trade.price, trade.count, trade.timestamp, trade.response]
+    );
   } catch (err) {
-    logger.warn({ err }, "Failed to persist settlements");
+    logger.warn({ err }, "Failed to save trade to DB");
+  }
+}
+
+async function dbLoadSettlements(): Promise<Settlement[]> {
+  try {
+    const pool = getPool();
+    const res = await pool.query(
+      `SELECT ticker, side, result, won, buy_price_cents, total_bought, sold_via_stop_loss,
+              settled_count, stop_loss_pnl_cents, settlement_pnl_cents, total_pnl_cents, settled_at
+       FROM settlements ORDER BY settled_at DESC`
+    );
+    return res.rows.map((r) => ({
+      ticker: r.ticker,
+      side: r.side as "yes" | "no",
+      result: r.result as "yes" | "no",
+      won: r.won,
+      buyPriceCents: Number(r.buy_price_cents),
+      totalBought: Number(r.total_bought),
+      soldViaStopLoss: Number(r.sold_via_stop_loss),
+      settledCount: Number(r.settled_count),
+      stopLossPnlCents: Number(r.stop_loss_pnl_cents),
+      settlementPnlCents: Number(r.settlement_pnl_cents),
+      totalPnlCents: Number(r.total_pnl_cents),
+      settledAt: new Date(r.settled_at).toISOString(),
+    }));
+  } catch (err) {
+    logger.warn({ err }, "Failed to load settlements from DB");
+    return [];
+  }
+}
+
+async function dbSaveSettlement(s: Settlement): Promise<void> {
+  try {
+    const pool = getPool();
+    await pool.query(
+      `INSERT INTO settlements (ticker, side, result, won, buy_price_cents, total_bought, sold_via_stop_loss,
+        settled_count, stop_loss_pnl_cents, settlement_pnl_cents, total_pnl_cents, settled_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       ON CONFLICT (ticker) DO UPDATE SET
+         result = EXCLUDED.result, won = EXCLUDED.won, total_pnl_cents = EXCLUDED.total_pnl_cents,
+         settlement_pnl_cents = EXCLUDED.settlement_pnl_cents, settled_at = EXCLUDED.settled_at`,
+      [s.ticker, s.side, s.result, s.won, s.buyPriceCents, s.totalBought, s.soldViaStopLoss,
+       s.settledCount, s.stopLossPnlCents, s.settlementPnlCents, s.totalPnlCents, s.settledAt]
+    );
+  } catch (err) {
+    logger.warn({ err }, "Failed to save settlement to DB");
   }
 }
 
@@ -208,33 +249,21 @@ interface KalshiOrderbookFp {
   };
 }
 
-const _persistedTrades = loadTrades();
-const _persistedSettlements = loadSettlements();
-
-// Derive unique markets from persisted buy trades
-const _persistedTradedMarkets = [
-  ...new Set(
-    _persistedTrades
-      .filter((t) => t.action === "buy")
-      .map((t) => t.ticker),
-  ),
-];
-
 const state: BotState = {
   status: "idle",
   startedAt: null,
   currentMarket: null,
-  trades: _persistedTrades,
-  tradedMarkets: _persistedTradedMarkets,
+  trades: [],
+  tradedMarkets: [],
   openPositions: [],
-  settlements: _persistedSettlements,
+  settlements: [],
   stopLossPrice: 0.80,
   lastError: null,
   lastPollAt: null,
-  totalTrades: _persistedTrades.length,
-  totalPnlCents: _persistedSettlements.reduce((s, x) => s + x.totalPnlCents, 0),
-  winCount: _persistedSettlements.filter((x) => x.won).length,
-  lossCount: _persistedSettlements.filter((x) => !x.won).length,
+  totalTrades: 0,
+  totalPnlCents: 0,
+  winCount: 0,
+  lossCount: 0,
 };
 
 let stopRequested = false;
@@ -246,6 +275,30 @@ export function getBotState(): BotState {
     openPositions: [...state.openPositions],
     settlements: [...state.settlements],
   };
+}
+
+async function initializeFromDb(): Promise<void> {
+  const [trades, settlements] = await Promise.all([
+    dbLoadTrades(),
+    dbLoadSettlements(),
+  ]);
+
+  state.trades = trades;
+  state.settlements = settlements;
+  state.tradedMarkets = [
+    ...new Set(
+      trades.filter((t) => t.action === "buy").map((t) => t.ticker),
+    ),
+  ];
+  state.totalTrades = trades.length;
+  state.totalPnlCents = settlements.reduce((s, x) => s + x.totalPnlCents, 0);
+  state.winCount = settlements.filter((x) => x.won).length;
+  state.lossCount = settlements.filter((x) => !x.won).length;
+
+  logger.info(
+    { trades: trades.length, settlements: settlements.length },
+    "Loaded state from database",
+  );
 }
 
 async function fetchMarketResult(
@@ -260,7 +313,6 @@ async function fetchMarketResult(
 }
 
 async function settlePosition(pos: Position): Promise<void> {
-  // Retry fetching the result a few times — settlements can lag a few seconds
   let result: "yes" | "no" | null = null;
   for (let attempt = 0; attempt < 6; attempt++) {
     try {
@@ -308,7 +360,7 @@ async function settlePosition(pos: Position): Promise<void> {
   if (won) state.winCount += 1;
   else state.lossCount += 1;
 
-  saveSettlements(state.settlements);
+  void dbSaveSettlement(settlement);
 
   logger.info(
     { ticker: pos.ticker, result, won, totalPnlCents, settlementPnlCents, stopLossPnlCents: pos.stopLossPnlCents },
@@ -361,7 +413,7 @@ async function getOrderbookPrices(
 
 function recordTrade(trade: Trade): void {
   state.trades.unshift(trade);
-  saveTrades(state.trades);
+  void dbSaveTrade(trade);
 }
 
 async function runLoop(
@@ -393,13 +445,12 @@ async function runLoop(
       for (const pos of [...state.openPositions]) {
         const mkt = withTiming.find((w) => w.market.ticker === pos.ticker);
 
-        // Market expired — fetch result and record PnL, then remove position
         if (!mkt || mkt.timeLeftSeconds <= 0) {
           state.openPositions = state.openPositions.filter(
             (p) => p.ticker !== pos.ticker,
           );
           logger.info({ ticker: pos.ticker }, "Position expired — fetching settlement result");
-          void settlePosition(pos); // fire-and-forget with internal retry
+          void settlePosition(pos);
           continue;
         }
 
@@ -410,7 +461,6 @@ async function runLoop(
           const currentPrice = pos.side === "yes" ? yesPrice : noPrice;
           if (currentPrice === null) continue;
 
-          // Helper: fire a partial sell for this position
           const fireSell = async (count: number, label: string) => {
             const sellPriceInCents = Math.max(1, Math.floor(currentPrice * 100));
             logger.warn(
@@ -442,7 +492,6 @@ async function runLoop(
               recordTrade(sellTrade);
               state.totalTrades += 1;
               pos.remaining -= count;
-              // Accumulate stop-loss PnL: (sell - buy) * count in cents
               const buyPriceCents = Math.round(pos.boughtAt * 100);
               pos.stopLossPnlCents += (sellPriceInCents - buyPriceCents) * count;
               logger.info({ sellTrade, remainingAfter: pos.remaining, stopLossPnlCents: pos.stopLossPnlCents }, `Stop loss ${label} sell placed`);
@@ -452,26 +501,22 @@ async function runLoop(
             }
           };
 
-          // Tier 1: price ≤ $0.90 → sell first 1/3
           if (!pos.tier1Triggered && currentPrice <= 0.90) {
             pos.tier1Triggered = true;
             const toSell = Math.max(1, Math.floor(pos.totalCount / 3));
             await fireSell(Math.min(toSell, pos.remaining), "T1@0.90");
           }
 
-          // Tier 2: price ≤ $0.87 → sell another 1/3
           if (!pos.tier2Triggered && currentPrice <= 0.87) {
             pos.tier2Triggered = true;
             const toSell = Math.max(1, Math.floor(pos.totalCount / 3));
             await fireSell(Math.min(toSell, pos.remaining), "T2@0.87");
           }
 
-          // Tier 3: price ≤ $0.85 → sell everything remaining
           if (pos.tier1Triggered && pos.tier2Triggered && currentPrice <= 0.85 && pos.remaining > 0) {
             await fireSell(pos.remaining, "T3@0.85");
           }
 
-          // Clean up fully exited positions
           if (pos.remaining <= 0) {
             state.openPositions = state.openPositions.filter((p) => p.ticker !== pos.ticker);
           }
@@ -551,6 +596,8 @@ async function runLoop(
         if (stopRequested) break;
         const ticker = market.ticker;
 
+        if (state.tradedMarkets.includes(ticker)) continue;
+
         const { yesPrice, noPrice } = await getOrderbookPrices(ticker);
 
         if (state.currentMarket?.ticker === ticker) {
@@ -574,7 +621,6 @@ async function runLoop(
         }
 
         if (tradeSide) {
-          // Kalshi prices must be 1-99 cents; use floor to avoid 100
           const priceInCents = Math.min(99, Math.max(1, Math.floor(tradePrice * 100)));
 
           let contractCount = tradeSize;
@@ -630,7 +676,6 @@ async function runLoop(
             state.tradedMarkets.push(ticker);
             state.totalTrades += 1;
 
-            // Track this as an open position for tiered stop loss monitoring
             state.openPositions.push({
               ticker,
               side: tradeSide,
@@ -676,7 +721,7 @@ export interface BotConfig {
   stopLossPrice?: number;
 }
 
-export function startBot(config: BotConfig = {}): void {
+export async function startBot(config: BotConfig = {}): Promise<void> {
   if (state.status === "running") {
     logger.warn("Bot is already running");
     return;
@@ -698,6 +743,9 @@ export function startBot(config: BotConfig = {}): void {
     checkIntervalMs = 500,
     stopLossPrice = 0.80,
   } = config;
+
+  // Load all historical data from DB before starting
+  await initializeFromDb();
 
   stopRequested = false;
   state.status = "running";
