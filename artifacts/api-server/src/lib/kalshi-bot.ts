@@ -332,8 +332,12 @@ async function runLoop(
         }
 
         if (tradeSide) {
-          // Fetch live balance and calculate max contracts we can afford
-          const priceInCents = Math.round(tradePrice * 100);
+          // Kalshi prices must be 1-99 cents (integer); cap in case of floating point rounding
+          const priceInCents = Math.min(99, Math.max(1, Math.floor(tradePrice * 100)));
+
+          // Mark market as traded immediately so we never retry this window on error
+          state.tradedMarkets.push(ticker);
+
           let contractCount = tradeSize; // fallback
           try {
             const balanceResp = await kalshiAuthGet<{ balance: number }>(
@@ -341,7 +345,7 @@ async function runLoop(
               apiKey,
               privateKey,
             );
-            // balance is in cents; price is in cents — buy as many as possible
+            // balance is in cents; price per contract is in cents — buy max whole contracts
             const balanceCents = balanceResp.balance;
             contractCount = Math.max(1, Math.floor(balanceCents / priceInCents));
             logger.info(
@@ -353,11 +357,11 @@ async function runLoop(
           }
 
           logger.info(
-            { ticker, side: tradeSide, price: tradePrice, count: contractCount },
+            { ticker, side: tradeSide, price: tradePrice, priceInCents, count: contractCount },
             "Placing order",
           );
 
-          // yes_price / no_price in CENTS (integer 1-99); body NOT included in signature
+          // yes_price / no_price in CENTS (integer 1-99); body NOT included in RSA signature
           const orderBody = {
             ticker,
             action: "buy",
@@ -369,28 +373,32 @@ async function runLoop(
               : { no_price: priceInCents }),
           };
 
-          const response = await kalshiPost<unknown>(
-            "/portfolio/orders",
-            orderBody,
-            apiKey,
-            privateKey,
-          );
+          try {
+            const response = await kalshiPost<unknown>(
+              "/portfolio/orders",
+              orderBody,
+              apiKey,
+              privateKey,
+            );
 
-          const trade: Trade = {
-            id: `${ticker}-${tradeSide}-${Date.now()}`,
-            ticker,
-            side: tradeSide,
-            price: tradePrice,
-            count: contractCount,
-            timestamp: new Date().toISOString(),
-            response,
-          };
+            const trade: Trade = {
+              id: `${ticker}-${tradeSide}-${Date.now()}`,
+              ticker,
+              side: tradeSide,
+              price: tradePrice,
+              count: contractCount,
+              timestamp: new Date().toISOString(),
+              response,
+            };
 
-          state.trades.unshift(trade);
-          state.tradedMarkets.push(ticker);
-          state.totalTrades += 1;
-
-          logger.info({ trade }, "Order placed successfully");
+            state.trades.unshift(trade);
+            state.totalTrades += 1;
+            logger.info({ trade }, "Order placed successfully");
+          } catch (orderErr) {
+            const msg = orderErr instanceof Error ? orderErr.message : String(orderErr);
+            state.lastError = msg;
+            logger.error({ err: msg, ticker, side: tradeSide, priceInCents, contractCount }, "Order failed — market marked as done, will not retry");
+          }
         }
       }
     } catch (err) {
