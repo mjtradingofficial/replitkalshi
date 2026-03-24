@@ -51,14 +51,14 @@ const API_PATH_PREFIX = "/trade-api/v2";
 function signRequest(
   method: string,
   path: string,
-  body: string,
+  _body: string,
   apiKey: string,
   privateKey: crypto.KeyObject,
 ): Record<string, string> {
   const timestamp = String(Date.now());
-  // Kalshi requires the full path including /trade-api/v2 in the signed message
+  // Kalshi signs: timestamp + METHOD + /trade-api/v2/path  (body is NOT included)
   const fullPath = API_PATH_PREFIX + path;
-  const message = timestamp + method + fullPath + body;
+  const message = timestamp + method + fullPath;
   // Kalshi Elections API: RSA-PSS with SHA-256, salt length = 32 (digest size)
   const signature = crypto
     .sign("sha256", Buffer.from(message), {
@@ -337,7 +337,7 @@ async function runLoop(
           };
 
           const response = await kalshiPost<unknown>(
-            "/orders",
+            "/portfolio/orders",
             orderBody,
             apiKey,
             privateKey,
