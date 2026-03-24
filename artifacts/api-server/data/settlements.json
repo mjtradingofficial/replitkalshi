@@ -1,0 +1,16 @@
+[
+  {
+    "ticker": "KXBTC15M-26MAR240015-15",
+    "side": "yes",
+    "result": "yes",
+    "won": true,
+    "buyPriceCents": 98,
+    "totalBought": 14,
+    "soldViaStopLoss": 0,
+    "settledCount": 14,
+    "stopLossPnlCents": 0,
+    "settlementPnlCents": 28,
+    "totalPnlCents": 28,
+    "settledAt": "2026-03-24T04:15:09.637Z"
+  }
+]
