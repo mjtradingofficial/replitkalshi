@@ -33,8 +33,9 @@ export function StatusCard() {
   const [config, setConfig] = useState({
     tradeSize: 10,
     thresholdCents: 97,
-    windowSeconds: 120,
-    checkIntervalMs: 500
+    windowSeconds: 180,
+    checkIntervalMs: 500,
+    stopLossPrice: 0.80,
   });
 
   const isRunning = statusData?.status === "running";
@@ -42,7 +43,15 @@ export function StatusCard() {
 
   const handleStart = (e: React.FormEvent) => {
     e.preventDefault();
-    startMutation.mutate({ data: config });
+    startMutation.mutate({
+      data: {
+        tradeSize: config.tradeSize,
+        thresholdCents: config.thresholdCents,
+        windowSeconds: config.windowSeconds,
+        checkIntervalMs: config.checkIntervalMs,
+        stopLossPrice: config.stopLossPrice,
+      }
+    });
   };
 
   return (
@@ -158,6 +167,22 @@ export function StatusCard() {
                 className="w-full bg-black/50 border border-card-border rounded-xl px-4 py-3 font-mono text-foreground focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary/50 transition-all"
                 min="1"
               />
+            </div>
+
+            <div>
+              <label className="block text-sm font-semibold text-muted-foreground mb-2 flex items-center gap-2">
+                Stop Loss Price ($)
+              </label>
+              <input
+                type="number"
+                value={config.stopLossPrice}
+                onChange={e => setConfig({ ...config, stopLossPrice: parseFloat(e.target.value) || 0 })}
+                className="w-full bg-black/50 border border-orange-500/30 rounded-xl px-4 py-3 font-mono text-foreground focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500/50 transition-all"
+                min="0.01"
+                max="0.99"
+                step="0.01"
+              />
+              <p className="text-xs text-muted-foreground mt-1">Sell all contracts if price drops to this level</p>
             </div>
           </div>
 

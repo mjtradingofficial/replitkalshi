@@ -1,11 +1,11 @@
 import crypto from "crypto";
+import fs from "fs";
+import path from "path";
 import { logger } from "./logger";
 
 const BASE_URL = "https://api.elections.kalshi.com/trade-api/v2";
+const TRADES_FILE = path.resolve("./data/trades.json");
 
-// Load RSA private key once. The env var is a base64-encoded PKCS#1 DER private key
-// (spaces are present because PEM newlines were replaced with spaces when stored).
-// Kalshi uses RSA-PSS (SHA-256, saltLength=32) for request signing.
 function loadPrivateKey(secret: string): crypto.KeyObject {
   const cleanBase64 = secret.replace(/\s+/g, "");
   const pem =
@@ -16,15 +16,24 @@ function loadPrivateKey(secret: string): crypto.KeyObject {
 }
 
 export type BotStatus = "idle" | "running" | "stopped" | "error";
+export type TradeAction = "buy" | "stop-loss-sell";
 
 export interface Trade {
   id: string;
   ticker: string;
   side: "yes" | "no";
+  action: TradeAction;
   price: number;
   count: number;
   timestamp: string;
   response: unknown;
+}
+
+export interface Position {
+  ticker: string;
+  side: "yes" | "no";
+  count: number;
+  boughtAt: number;
 }
 
 export interface MarketInfo {
@@ -41,9 +50,33 @@ export interface BotState {
   currentMarket: MarketInfo | null;
   trades: Trade[];
   tradedMarkets: string[];
+  openPositions: Position[];
+  stopLossPrice: number;
   lastError: string | null;
   lastPollAt: string | null;
   totalTrades: number;
+}
+
+// --- Trade persistence ---
+function loadTrades(): Trade[] {
+  try {
+    if (fs.existsSync(TRADES_FILE)) {
+      const raw = fs.readFileSync(TRADES_FILE, "utf-8");
+      return JSON.parse(raw) as Trade[];
+    }
+  } catch {
+    // ignore
+  }
+  return [];
+}
+
+function saveTrades(trades: Trade[]): void {
+  try {
+    fs.mkdirSync(path.dirname(TRADES_FILE), { recursive: true });
+    fs.writeFileSync(TRADES_FILE, JSON.stringify(trades, null, 2));
+  } catch (err) {
+    logger.warn({ err }, "Failed to persist trades");
+  }
 }
 
 const API_PATH_PREFIX = "/trade-api/v2";
@@ -56,10 +89,8 @@ function signRequest(
   privateKey: crypto.KeyObject,
 ): Record<string, string> {
   const timestamp = String(Date.now());
-  // Kalshi signs: timestamp + METHOD + /trade-api/v2/path  (body is NOT included)
   const fullPath = API_PATH_PREFIX + path;
   const message = timestamp + method + fullPath;
-  // Kalshi Elections API: RSA-PSS with SHA-256, salt length = 32 (digest size)
   const signature = crypto
     .sign("sha256", Buffer.from(message), {
       key: privateKey,
@@ -75,7 +106,6 @@ function signRequest(
   };
 }
 
-// Public (unauthenticated) GET — used for markets and orderbooks which are public
 async function kalshiPublicGet<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`);
   if (!res.ok) {
@@ -85,7 +115,6 @@ async function kalshiPublicGet<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-// Authenticated GET — used for private endpoints (balance, positions, orders)
 async function kalshiAuthGet<T>(
   path: string,
   apiKey: string,
@@ -122,13 +151,11 @@ async function kalshiPost<T>(
 
 interface KalshiMarket {
   ticker: string;
-  close_time: string;      // when trading CLOSES (15 min after open) — use this for countdown
-  expiration_time: string; // when the contract settles (7 days later) — not used for timing
+  close_time: string;
+  expiration_time: string;
   status: string;
 }
 
-// Orderbook_fp prices are returned as [string_price, string_quantity] pairs
-// Sorted ascending by price (lowest ask first)
 interface KalshiOrderbookFp {
   orderbook_fp: {
     yes_dollars?: [string, string][];
@@ -140,8 +167,10 @@ const state: BotState = {
   status: "idle",
   startedAt: null,
   currentMarket: null,
-  trades: [],
+  trades: loadTrades(),
   tradedMarkets: [],
+  openPositions: [],
+  stopLossPrice: 0.80,
   lastError: null,
   lastPollAt: null,
   totalTrades: 0,
@@ -150,7 +179,11 @@ const state: BotState = {
 let stopRequested = false;
 
 export function getBotState(): BotState {
-  return { ...state, trades: [...state.trades] };
+  return {
+    ...state,
+    trades: [...state.trades],
+    openPositions: [...state.openPositions],
+  };
 }
 
 async function fetchOpenBtc15mMarkets(): Promise<KalshiMarket[]> {
@@ -181,14 +214,9 @@ async function getOrderbookPrices(
     `/markets/${ticker}/orderbook`,
   );
 
-  // yes_dollars / no_dollars are [price_string, qty_string][] sorted ascending by price
-  // They represent BID levels — the LAST entry is the highest (best) bid for each side
-  // YES price (highest YES bid) ≈ probability YES wins
-  // NO price (highest NO bid) ≈ probability NO wins
   const yesDollars = ob.orderbook_fp?.yes_dollars ?? [];
   const noDollars = ob.orderbook_fp?.no_dollars ?? [];
 
-  // Take the LAST element (highest bid) — prices are strings like "0.9900"
   const yesPrice =
     yesDollars.length > 0
       ? parseFloat(yesDollars[yesDollars.length - 1][0])
@@ -201,6 +229,11 @@ async function getOrderbookPrices(
   return { yesPrice, noPrice };
 }
 
+function recordTrade(trade: Trade): void {
+  state.trades.unshift(trade);
+  saveTrades(state.trades);
+}
+
 async function runLoop(
   apiKey: string,
   privateKey: crypto.KeyObject,
@@ -210,7 +243,7 @@ async function runLoop(
   checkIntervalMs: number,
 ): Promise<void> {
   let displayRefreshTick = 0;
-  const DISPLAY_REFRESH_EVERY = 10; // refresh display price every N ticks
+  const DISPLAY_REFRESH_EVERY = 10;
 
   while (!stopRequested) {
     try {
@@ -220,14 +253,84 @@ async function runLoop(
       const markets = await fetchOpenBtc15mMarkets();
       const now = new Date();
 
-      // Use close_time (end of 15-min trading window) for countdown — NOT expiration_time (7 days)
       const withTiming = markets.map((m) => ({
         market: m,
         closeAt: new Date(m.close_time),
         timeLeftSeconds: (new Date(m.close_time).getTime() - now.getTime()) / 1000,
       }));
 
-      // Markets in the trigger window: trading closes within windowSeconds, hasn't been traded
+      // --- Stop loss check: monitor all open positions ---
+      for (const pos of [...state.openPositions]) {
+        const mkt = withTiming.find((w) => w.market.ticker === pos.ticker);
+
+        // Market expired — position settled, remove it
+        if (!mkt || mkt.timeLeftSeconds <= 0) {
+          state.openPositions = state.openPositions.filter(
+            (p) => p.ticker !== pos.ticker,
+          );
+          logger.info({ ticker: pos.ticker }, "Position expired/settled, removed");
+          continue;
+        }
+
+        // Check current price of the side we hold
+        try {
+          const { yesPrice, noPrice } = await getOrderbookPrices(pos.ticker);
+          const currentPrice = pos.side === "yes" ? yesPrice : noPrice;
+
+          if (currentPrice !== null && currentPrice <= state.stopLossPrice) {
+            const sellPriceInCents = Math.max(1, Math.floor(currentPrice * 100));
+            logger.warn(
+              { ticker: pos.ticker, side: pos.side, currentPrice, stopLossPrice: state.stopLossPrice, sellPriceInCents },
+              "Stop loss triggered — selling position",
+            );
+
+            const sellBody = {
+              ticker: pos.ticker,
+              action: "sell",
+              side: pos.side,
+              type: "limit",
+              count: pos.count,
+              ...(pos.side === "yes"
+                ? { yes_price: sellPriceInCents }
+                : { no_price: sellPriceInCents }),
+            };
+
+            try {
+              const response = await kalshiPost<unknown>(
+                "/portfolio/orders",
+                sellBody,
+                apiKey,
+                privateKey,
+              );
+
+              const sellTrade: Trade = {
+                id: `${pos.ticker}-${pos.side}-sell-${Date.now()}`,
+                ticker: pos.ticker,
+                side: pos.side,
+                action: "stop-loss-sell",
+                price: currentPrice,
+                count: pos.count,
+                timestamp: new Date().toISOString(),
+                response,
+              };
+
+              recordTrade(sellTrade);
+              state.totalTrades += 1;
+              state.openPositions = state.openPositions.filter(
+                (p) => p.ticker !== pos.ticker,
+              );
+              logger.info({ sellTrade }, "Stop loss sell placed successfully");
+            } catch (sellErr) {
+              const msg = sellErr instanceof Error ? sellErr.message : String(sellErr);
+              logger.error({ err: msg, pos }, "Stop loss sell order failed");
+            }
+          }
+        } catch {
+          // ignore price fetch error for this position tick
+        }
+      }
+
+      // --- Identify nearest market for display ---
       const inWindow = withTiming
         .filter(
           ({ timeLeftSeconds, market }) =>
@@ -237,20 +340,20 @@ async function runLoop(
         )
         .sort((a, b) => a.timeLeftSeconds - b.timeLeftSeconds);
 
-      // Nearest market by close_time (for dashboard display, including those outside the window)
       const nearest = withTiming
         .filter(({ timeLeftSeconds }) => timeLeftSeconds > 0)
         .sort((a, b) => a.timeLeftSeconds - b.timeLeftSeconds)[0];
 
       if (nearest) {
-        let displayYes = state.currentMarket?.ticker === nearest.market.ticker
-          ? state.currentMarket.yesPrice
-          : null;
-        let displayNo = state.currentMarket?.ticker === nearest.market.ticker
-          ? state.currentMarket.noPrice
-          : null;
+        let displayYes =
+          state.currentMarket?.ticker === nearest.market.ticker
+            ? state.currentMarket.yesPrice
+            : null;
+        let displayNo =
+          state.currentMarket?.ticker === nearest.market.ticker
+            ? state.currentMarket.noPrice
+            : null;
 
-        // Refresh display prices every DISPLAY_REFRESH_EVERY ticks (deterministic)
         const shouldRefreshDisplay =
           displayYes === null ||
           displayNo === null ||
@@ -293,30 +396,19 @@ async function runLoop(
         continue;
       }
 
-      // Check each market in the window
+      // --- Buy check ---
       for (const { market, timeLeftSeconds } of inWindow) {
         if (stopRequested) break;
         const ticker = market.ticker;
 
         const { yesPrice, noPrice } = await getOrderbookPrices(ticker);
 
-        // Update display if this is the nearest market
         if (state.currentMarket?.ticker === ticker) {
-          state.currentMarket = {
-            ...state.currentMarket,
-            yesPrice,
-            noPrice,
-          };
+          state.currentMarket = { ...state.currentMarket, yesPrice, noPrice };
         }
 
         logger.info(
-          {
-            ticker,
-            timeLeftSeconds: Math.round(timeLeftSeconds),
-            yesPrice,
-            noPrice,
-            threshold,
-          },
+          { ticker, timeLeftSeconds: Math.round(timeLeftSeconds), yesPrice, noPrice, threshold },
           "Orderbook check",
         );
 
@@ -332,23 +424,19 @@ async function runLoop(
         }
 
         if (tradeSide) {
-          // Kalshi prices must be 1-99 cents (integer); cap in case of floating point rounding
+          // Kalshi prices must be 1-99 cents; use floor to avoid 100
           const priceInCents = Math.min(99, Math.max(1, Math.floor(tradePrice * 100)));
 
-          let contractCount = tradeSize; // fallback
+          let contractCount = tradeSize;
           try {
             const balanceResp = await kalshiAuthGet<{ balance: number }>(
               "/portfolio/balance",
               apiKey,
               privateKey,
             );
-            // balance is in cents; price per contract is in cents — buy max whole contracts
             const balanceCents = balanceResp.balance;
             contractCount = Math.max(1, Math.floor(balanceCents / priceInCents));
-            logger.info(
-              { balanceCents, priceInCents, contractCount },
-              "Calculated max contracts from balance",
-            );
+            logger.info({ balanceCents, priceInCents, contractCount }, "Calculated max contracts from balance");
           } catch (balErr) {
             logger.warn({ err: balErr }, "Could not fetch balance, using fallback tradeSize");
           }
@@ -358,7 +446,6 @@ async function runLoop(
             "Placing order",
           );
 
-          // yes_price / no_price in CENTS (integer 1-99); body NOT included in RSA signature
           const orderBody = {
             ticker,
             action: "buy",
@@ -382,15 +469,25 @@ async function runLoop(
               id: `${ticker}-${tradeSide}-${Date.now()}`,
               ticker,
               side: tradeSide,
+              action: "buy",
               price: tradePrice,
               count: contractCount,
               timestamp: new Date().toISOString(),
               response,
             };
 
-            state.trades.unshift(trade);
+            recordTrade(trade);
             state.tradedMarkets.push(ticker);
             state.totalTrades += 1;
+
+            // Track this as an open position for stop loss monitoring
+            state.openPositions.push({
+              ticker,
+              side: tradeSide,
+              count: contractCount,
+              boughtAt: tradePrice,
+            });
+
             logger.info({ trade }, "Order placed successfully");
           } catch (orderErr) {
             const msg = orderErr instanceof Error ? orderErr.message : String(orderErr);
@@ -422,6 +519,7 @@ export interface BotConfig {
   threshold?: number;
   windowSeconds?: number;
   checkIntervalMs?: number;
+  stopLossPrice?: number;
 }
 
 export function startBot(config: BotConfig = {}): void {
@@ -437,7 +535,6 @@ export function startBot(config: BotConfig = {}): void {
     throw new Error("KALSHI_API_KEY and KALSHI_API_SECRET must be set");
   }
 
-  // Load RSA private key once at startup
   const privateKey = loadPrivateKey(apiSecret);
 
   const {
@@ -445,15 +542,17 @@ export function startBot(config: BotConfig = {}): void {
     threshold = 0.97,
     windowSeconds = 180,
     checkIntervalMs = 500,
+    stopLossPrice = 0.80,
   } = config;
 
   stopRequested = false;
   state.status = "running";
   state.startedAt = new Date().toISOString();
   state.lastError = null;
+  state.stopLossPrice = stopLossPrice;
 
   logger.info(
-    { tradeSize, threshold, windowSeconds, checkIntervalMs },
+    { tradeSize, threshold, windowSeconds, checkIntervalMs, stopLossPrice },
     "Starting Kalshi BTC15M bot (RSA-PSS auth)",
   );
 

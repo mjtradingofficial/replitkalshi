@@ -17,6 +17,8 @@ router.get("/bot/status", (_req, res) => {
     lastError: state.lastError,
     totalTrades: state.totalTrades,
     tradedMarkets: state.tradedMarkets,
+    openPositions: state.openPositions,
+    stopLossPrice: state.stopLossPrice,
   });
 });
 
@@ -31,10 +33,11 @@ router.post("/bot/start", (req, res) => {
     threshold,
     windowSeconds,
     checkIntervalMs,
+    stopLossPrice,
   } = req.body as Record<string, number | undefined>;
 
   try {
-    startBot({ tradeSize, threshold, windowSeconds, checkIntervalMs });
+    startBot({ tradeSize, threshold, windowSeconds, checkIntervalMs, stopLossPrice });
     res.json({ success: true, message: "Bot started" });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
