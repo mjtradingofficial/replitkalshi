@@ -319,7 +319,7 @@ async function initializeFromDb(): Promise<void> {
     const sellsForTicker = stopLossTrades.filter((t) => t.ticker === buy.ticker);
     const totalSold = sellsForTicker.reduce((s, t) => s + t.count, 0);
     const remaining = Math.max(0, buy.count - totalSold);
-    const buyPriceCents = Math.round(buy.price * 100);
+    const buyPriceCents = Math.min(99, Math.max(1, Math.floor(buy.price * 100)));
     const stopLossPnlCents = sellsForTicker.reduce((s, t) => {
       const sellPriceCents = Math.floor(t.price * 100);
       return s + (sellPriceCents - buyPriceCents) * t.count;
@@ -381,7 +381,7 @@ async function settlePosition(pos: Position): Promise<void> {
   }
 
   const won = result === pos.side;
-  const buyPriceCents = Math.round(pos.boughtAt * 100);
+  const buyPriceCents = Math.min(99, Math.max(1, Math.floor(pos.boughtAt * 100)));
   const soldViaStopLoss = pos.totalCount - pos.remaining;
   const settledCount = pos.remaining;
 
@@ -546,7 +546,7 @@ async function runLoop(
                 recordTrade(sellTrade);
                 state.totalTrades += 1;
                 pos.remaining -= count;
-                const buyPriceCents = Math.round(pos.boughtAt * 100);
+                const buyPriceCents = Math.min(99, Math.max(1, Math.floor(pos.boughtAt * 100)));
                 pos.stopLossPnlCents += (sellPriceInCents - buyPriceCents) * count;
                 logger.info({ sellTrade, remainingAfter: pos.remaining, stopLossPnlCents: pos.stopLossPnlCents }, `Stop loss ${label} sell placed`);
               } catch (sellErr) {
@@ -726,39 +726,54 @@ async function runLoop(
           };
 
           try {
-            const response = await kalshiPost<unknown>(
+            const response = await kalshiPost<{ order?: { fill_count_fp?: string; remaining_count_fp?: string; order_id?: string } }>(
               "/portfolio/orders",
               orderBody,
               apiKey,
               privateKey,
             );
 
-            const trade: Trade = {
-              id: `${ticker}-${tradeSide}-${Date.now()}`,
-              ticker,
-              side: tradeSide,
-              action: "buy",
-              price: tradePrice,
-              count: contractCount,
-              timestamp: new Date().toISOString(),
-              response,
-            };
+            // Determine how many contracts were actually filled immediately
+            const fillCountFp = parseFloat(response?.order?.fill_count_fp ?? String(contractCount));
+            const filledCount = isNaN(fillCountFp) ? contractCount : Math.floor(fillCountFp);
 
-            recordTrade(trade);
+            // Always mark as traded so we don't retry this market
             state.tradedMarkets.push(ticker);
-            state.totalTrades += 1;
 
-            state.openPositions.push({
-              ticker,
-              side: tradeSide,
-              totalCount: contractCount,
-              remaining: contractCount,
-              boughtAt: tradePrice,
-              triggeredTiers: new Array(stopLossTiers.length).fill(false),
-              stopLossPnlCents: 0,
-            });
+            if (filledCount === 0) {
+              // Order placed but nothing filled yet — resting in the book.
+              // Kalshi will cancel it at expiry and refund the reserved funds.
+              logger.warn({ ticker, orderId: response?.order?.order_id }, "Order resting with 0 fills — not tracking as position");
+            } else {
+              // Use the exact order price (floored cents) — not the raw orderbook price
+              const exactBoughtAt = priceInCents / 100;
 
-            logger.info({ trade }, "Order placed successfully");
+              const trade: Trade = {
+                id: `${ticker}-${tradeSide}-${Date.now()}`,
+                ticker,
+                side: tradeSide,
+                action: "buy",
+                price: exactBoughtAt,
+                count: filledCount,
+                timestamp: new Date().toISOString(),
+                response,
+              };
+
+              recordTrade(trade);
+              state.totalTrades += 1;
+
+              state.openPositions.push({
+                ticker,
+                side: tradeSide,
+                totalCount: filledCount,
+                remaining: filledCount,
+                boughtAt: exactBoughtAt,
+                triggeredTiers: new Array(stopLossTiers.length).fill(false),
+                stopLossPnlCents: 0,
+              });
+
+              logger.info({ trade, filledCount }, "Order placed and position opened");
+            }
           } catch (orderErr) {
             const msg = orderErr instanceof Error ? orderErr.message : String(orderErr);
             state.lastError = msg;
