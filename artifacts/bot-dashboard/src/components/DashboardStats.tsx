@@ -21,7 +21,7 @@ export function DashboardStats() {
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
-      <div className="glass-panel rounded-2xl p-5 flex items-center gap-4 relative overflow-hidden group">
+      <div className="glass-panel rgb-bubble rounded-2xl p-5 flex items-center gap-4 relative overflow-hidden group">
         <div className="absolute inset-0 bg-gradient-to-r from-primary/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
         <div className="w-10 h-10 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
           <Zap className="w-5 h-5 text-primary" />
@@ -32,7 +32,7 @@ export function DashboardStats() {
         </div>
       </div>
 
-      <div className="glass-panel rounded-2xl p-5 flex items-center gap-4 relative overflow-hidden group">
+      <div className="glass-panel rgb-bubble rounded-2xl p-5 flex items-center gap-4 relative overflow-hidden group" style={{ animationDelay: "0.6s" }}>
         <div className="absolute inset-0 bg-gradient-to-r from-success/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
         <div className="w-10 h-10 rounded-xl bg-success/10 border border-success/20 flex items-center justify-center shrink-0">
           <Crosshair className="w-5 h-5 text-success" />
@@ -43,7 +43,7 @@ export function DashboardStats() {
         </div>
       </div>
 
-      <div className="glass-panel rounded-2xl p-5 flex items-center gap-4 relative overflow-hidden group col-span-2 md:col-span-1">
+      <div className="glass-panel rgb-bubble rounded-2xl p-5 flex items-center gap-4 relative overflow-hidden group col-span-2 md:col-span-1" style={{ animationDelay: "1.2s" }}>
         <div className="absolute inset-0 bg-gradient-to-r from-white/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
         <div className="w-10 h-10 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center shrink-0">
           <Layers className="w-5 h-5 text-foreground" />
@@ -54,7 +54,7 @@ export function DashboardStats() {
         </div>
       </div>
 
-      <div className="glass-panel rounded-2xl p-5 flex items-center gap-4 relative overflow-hidden group">
+      <div className="glass-panel rgb-bubble rounded-2xl p-5 flex items-center gap-4 relative overflow-hidden group" style={{ animationDelay: "1.8s" }}>
         <div className={cn(
           "absolute inset-0 bg-gradient-to-r to-transparent opacity-0 group-hover:opacity-100 transition-opacity",
           pnlPositive ? "from-success/5" : "from-danger/5"
@@ -76,7 +76,7 @@ export function DashboardStats() {
         </div>
       </div>
 
-      <div className="glass-panel rounded-2xl p-5 flex items-center gap-4 relative overflow-hidden group">
+      <div className="glass-panel rgb-bubble rounded-2xl p-5 flex items-center gap-4 relative overflow-hidden group" style={{ animationDelay: "2.4s" }}>
         <div className="absolute inset-0 bg-gradient-to-r from-violet/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
         <div className="w-10 h-10 rounded-xl bg-violet-500/10 border border-violet-500/20 flex items-center justify-center shrink-0">
           <Target className="w-5 h-5 text-violet-400" />

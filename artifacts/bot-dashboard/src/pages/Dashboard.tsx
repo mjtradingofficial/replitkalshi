@@ -1,13 +1,18 @@
-import React from "react";
+import React, { useState } from "react";
 import { motion } from "framer-motion";
-import { Terminal } from "lucide-react";
+import { Terminal, BookOpen, Trophy } from "lucide-react";
 import { StatusCard } from "@/components/StatusCard";
 import { MarketCard } from "@/components/MarketCard";
 import { TradeHistory } from "@/components/TradeHistory";
 import { DashboardStats } from "@/components/DashboardStats";
 import { SettlementHistory } from "@/components/SettlementHistory";
+import { cn } from "@/lib/utils";
+
+type Tab = "settlements" | "trades";
 
 export default function Dashboard() {
+  const [activeTab, setActiveTab] = useState<Tab>("settlements");
+
   return (
     <div className="min-h-screen relative pb-12">
       {/* Abstract Background Glows */}
@@ -57,8 +62,41 @@ export default function Dashboard() {
             transition={{ delay: 0.3 }}
             className="lg:col-span-8"
           >
-            <TradeHistory />
-          <SettlementHistory />
+            {/* Tab header */}
+            <div className="flex gap-1 mb-0 glass-panel rounded-t-2xl rounded-b-none border-b-0 px-4 pt-4 pb-0">
+              <button
+                onClick={() => setActiveTab("settlements")}
+                className={cn(
+                  "flex items-center gap-2 px-4 py-2.5 rounded-t-xl text-sm font-semibold transition-all border-b-2",
+                  activeTab === "settlements"
+                    ? "text-primary border-primary bg-primary/5"
+                    : "text-muted-foreground border-transparent hover:text-foreground hover:bg-white/5"
+                )}
+              >
+                <Trophy className="w-4 h-4" />
+                Settlements
+              </button>
+              <button
+                onClick={() => setActiveTab("trades")}
+                className={cn(
+                  "flex items-center gap-2 px-4 py-2.5 rounded-t-xl text-sm font-semibold transition-all border-b-2",
+                  activeTab === "trades"
+                    ? "text-primary border-primary bg-primary/5"
+                    : "text-muted-foreground border-transparent hover:text-foreground hover:bg-white/5"
+                )}
+              >
+                <BookOpen className="w-4 h-4" />
+                Trade Log
+              </button>
+            </div>
+
+            {/* Tab content */}
+            <div className={activeTab === "settlements" ? "block" : "hidden"}>
+              <SettlementHistory noHeader />
+            </div>
+            <div className={activeTab === "trades" ? "block" : "hidden"}>
+              <TradeHistory noHeader />
+            </div>
           </motion.div>
         </div>
       </main>

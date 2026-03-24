@@ -4,7 +4,7 @@ import { History, ArrowUpRight, ArrowDownRight, ShieldAlert } from "lucide-react
 import { useGetBotTrades } from "@workspace/api-client-react";
 import { formatCurrency, cn } from "@/lib/utils";
 
-export function TradeHistory() {
+export function TradeHistory({ noHeader }: { noHeader?: boolean }) {
   const { data, isLoading } = useGetBotTrades({
     query: { refetchInterval: 3000 }
   });
@@ -12,20 +12,33 @@ export function TradeHistory() {
   const trades = data?.trades || [];
 
   return (
-    <div className="glass-panel rounded-2xl flex flex-col h-full overflow-hidden">
-      <div className="p-6 border-b border-card-border bg-card/50 flex items-center gap-3">
-        <div className="p-2 bg-primary/10 rounded-lg">
-          <History className="w-5 h-5 text-primary" />
+    <div className="glass-panel rounded-tl-none rounded-tr-none rounded-b-2xl flex flex-col overflow-hidden">
+      {!noHeader && (
+        <div className="p-6 border-b border-card-border bg-card/50 flex items-center gap-3">
+          <div className="p-2 bg-primary/10 rounded-lg">
+            <History className="w-5 h-5 text-primary" />
+          </div>
+          <h2 className="text-xl font-bold tracking-tight text-foreground">Execution Log</h2>
+          <div className="ml-auto flex items-center gap-2 text-xs font-mono text-muted-foreground">
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-50"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-primary"></span>
+            </span>
+            LIVE SYNC
+          </div>
         </div>
-        <h2 className="text-xl font-bold tracking-tight text-foreground">Execution Log</h2>
-        <div className="ml-auto flex items-center gap-2 text-xs font-mono text-muted-foreground">
-          <span className="relative flex h-2 w-2">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-50"></span>
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-primary"></span>
-          </span>
-          LIVE SYNC
+      )}
+      {noHeader && (
+        <div className="px-5 py-3 border-b border-card-border bg-card/30 flex items-center">
+          <div className="flex items-center gap-2 text-xs font-mono text-muted-foreground ml-auto">
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-50"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-primary"></span>
+            </span>
+            LIVE SYNC
+          </div>
         </div>
-      </div>
+      )}
       
       <div className="flex-1 overflow-auto p-0 min-h-[400px]">
         {isLoading ? (

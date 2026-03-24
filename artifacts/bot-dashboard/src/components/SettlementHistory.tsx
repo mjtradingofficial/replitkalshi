@@ -24,21 +24,30 @@ function formatCents(cents: number): string {
   return `${sign}$${Math.abs(dollars).toFixed(2)}`;
 }
 
-export function SettlementHistory() {
+export function SettlementHistory({ noHeader }: { noHeader?: boolean }) {
   const { data, isLoading } = useFetchSettlements();
   const settlements = data?.settlements ?? [];
 
   return (
-    <div className="glass-panel rounded-2xl overflow-hidden mt-8">
-      <div className="p-6 border-b border-card-border bg-card/50 flex items-center gap-3">
-        <div className="p-2 bg-violet-500/10 rounded-lg">
-          <Trophy className="w-5 h-5 text-violet-400" />
+    <div className="glass-panel rounded-tl-none rounded-tr-none rounded-b-2xl overflow-hidden">
+      {!noHeader && (
+        <div className="p-6 border-b border-card-border bg-card/50 flex items-center gap-3">
+          <div className="p-2 bg-violet-500/10 rounded-lg">
+            <Trophy className="w-5 h-5 text-violet-400" />
+          </div>
+          <h2 className="text-xl font-bold tracking-tight text-foreground">Settlement Results</h2>
+          <span className="ml-auto text-xs font-mono text-muted-foreground">
+            {settlements.length} closed position{settlements.length !== 1 ? "s" : ""}
+          </span>
         </div>
-        <h2 className="text-xl font-bold tracking-tight text-foreground">Settlement Results</h2>
-        <span className="ml-auto text-xs font-mono text-muted-foreground">
-          {settlements.length} closed position{settlements.length !== 1 ? "s" : ""}
-        </span>
-      </div>
+      )}
+      {noHeader && (
+        <div className="px-5 py-3 border-b border-card-border bg-card/30 flex items-center">
+          <span className="text-xs font-mono text-muted-foreground ml-auto">
+            {settlements.length} closed position{settlements.length !== 1 ? "s" : ""}
+          </span>
+        </div>
+      )}
 
       <div className="overflow-auto">
         {isLoading ? (

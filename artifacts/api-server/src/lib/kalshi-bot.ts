@@ -308,8 +308,46 @@ async function initializeFromDb(): Promise<void> {
   state.winCount = settlements.filter((x) => x.won).length;
   state.lossCount = settlements.filter((x) => !x.won).length;
 
+  // Reconstruct open positions from trades that have no settlement yet
+  const settledTickers = new Set(settlements.map((s) => s.ticker));
+  const buyTrades = trades.filter((t) => t.action === "buy");
+  const stopLossTrades = trades.filter((t) => t.action === "stop-loss-sell");
+
+  for (const buy of buyTrades) {
+    if (settledTickers.has(buy.ticker)) continue;
+
+    const sellsForTicker = stopLossTrades.filter((t) => t.ticker === buy.ticker);
+    const totalSold = sellsForTicker.reduce((s, t) => s + t.count, 0);
+    const remaining = Math.max(0, buy.count - totalSold);
+    const buyPriceCents = Math.round(buy.price * 100);
+    const stopLossPnlCents = sellsForTicker.reduce((s, t) => {
+      const sellPriceCents = Math.floor(t.price * 100);
+      return s + (sellPriceCents - buyPriceCents) * t.count;
+    }, 0);
+
+    // Mark all tiers as triggered if any stop-loss sells exist (prevents re-firing)
+    const numTiers = state.stopLossTiers.length;
+    const triggeredTiers = sellsForTicker.length > 0
+      ? new Array(numTiers).fill(true)
+      : new Array(numTiers).fill(false);
+
+    state.openPositions.push({
+      ticker: buy.ticker,
+      side: buy.side,
+      totalCount: buy.count,
+      remaining,
+      boughtAt: buy.price,
+      triggeredTiers,
+      stopLossPnlCents,
+    });
+  }
+
   logger.info(
-    { trades: trades.length, settlements: settlements.length },
+    {
+      trades: trades.length,
+      settlements: settlements.length,
+      reconstructedPositions: state.openPositions.length,
+    },
     "Loaded state from database",
   );
 }
