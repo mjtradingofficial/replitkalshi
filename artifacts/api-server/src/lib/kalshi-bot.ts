@@ -65,6 +65,13 @@ export interface MarketInfo {
   noPrice: number | null;
 }
 
+export interface RestingOrder {
+  ticker: string;
+  orderId: string;
+  priceInCents: number;
+  count: number;
+}
+
 export interface BotState {
   status: BotStatus;
   startedAt: string | null;
@@ -72,6 +79,7 @@ export interface BotState {
   trades: Trade[];
   tradedMarkets: string[];
   openPositions: Position[];
+  restingOrders: RestingOrder[];
   settlements: Settlement[];
   useStopLoss: boolean;
   stopLossTiers: StopLossTier[];
@@ -246,6 +254,19 @@ async function kalshiPost<T>(
   return res.json() as Promise<T>;
 }
 
+async function kalshiDelete(
+  path: string,
+  apiKey: string,
+  privateKey: crypto.KeyObject,
+): Promise<void> {
+  const headers = signRequest("DELETE", path, "", apiKey, privateKey);
+  const res = await fetch(`${BASE_URL}${path}`, { method: "DELETE", headers });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Kalshi DELETE ${path} failed ${res.status}: ${text}`);
+  }
+}
+
 interface KalshiMarket {
   ticker: string;
   close_time: string;
@@ -267,6 +288,7 @@ const state: BotState = {
   trades: [],
   tradedMarkets: [],
   openPositions: [],
+  restingOrders: [],
   settlements: [],
   useStopLoss: true,
   stopLossTiers: DEFAULT_STOP_LOSS_TIERS,
@@ -493,6 +515,27 @@ async function runLoop(
         closeAt: new Date(m.close_time),
         timeLeftSeconds: (new Date(m.close_time).getTime() - now.getTime()) / 1000,
       }));
+
+      // --- Cancel expired resting orders so reserved funds are freed ---
+      if (state.restingOrders.length > 0) {
+        for (const ro of [...state.restingOrders]) {
+          const mkt = withTiming.find((w) => w.market.ticker === ro.ticker);
+          if (!mkt || mkt.timeLeftSeconds <= 0) {
+            // Market expired — cancel the resting order if still open
+            try {
+              await kalshiDelete(`/portfolio/orders/${ro.orderId}`, apiKey, privateKey);
+              logger.info({ ticker: ro.ticker, orderId: ro.orderId }, "Cancelled expired resting order — balance freed");
+            } catch (delErr) {
+              const msg = delErr instanceof Error ? delErr.message : String(delErr);
+              // 404 means already cancelled by Kalshi at expiry — that's fine
+              if (!msg.includes("404")) {
+                logger.warn({ ticker: ro.ticker, orderId: ro.orderId, err: msg }, "Could not cancel resting order (may already be gone)");
+              }
+            }
+            state.restingOrders = state.restingOrders.filter((r) => r.orderId !== ro.orderId);
+          }
+        }
+      }
 
       // --- Stop loss monitoring ---
       if (useStopLoss && stopLossTiers.length > 0) {
@@ -725,13 +768,43 @@ async function runLoop(
               : { no_price: priceInCents }),
           };
 
+          const placeOrder = async (count: number) => kalshiPost<{ order?: { fill_count_fp?: string; remaining_count_fp?: string; order_id?: string } }>(
+            "/portfolio/orders",
+            { ...orderBody, count },
+            apiKey,
+            privateKey,
+          );
+
           try {
-            const response = await kalshiPost<{ order?: { fill_count_fp?: string; remaining_count_fp?: string; order_id?: string } }>(
-              "/portfolio/orders",
-              orderBody,
-              apiKey,
-              privateKey,
-            );
+            let response: Awaited<ReturnType<typeof placeOrder>>;
+            try {
+              response = await placeOrder(contractCount);
+            } catch (firstErr) {
+              const msg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+              if (msg.includes("insufficient_balance") && state.restingOrders.length > 0) {
+                // Cancel all resting orders to free reserved funds, then recalculate and retry
+                logger.warn({ ticker, restingCount: state.restingOrders.length }, "insufficient_balance — cancelling resting orders and retrying");
+                for (const ro of [...state.restingOrders]) {
+                  try {
+                    await kalshiDelete(`/portfolio/orders/${ro.orderId}`, apiKey, privateKey);
+                    logger.info({ orderId: ro.orderId, ticker: ro.ticker }, "Cancelled resting order to free balance");
+                  } catch (delErr) {
+                    const delMsg = delErr instanceof Error ? delErr.message : String(delErr);
+                    if (!delMsg.includes("404")) logger.warn({ orderId: ro.orderId, err: delMsg }, "Could not cancel resting order");
+                  }
+                  state.restingOrders = state.restingOrders.filter((r) => r.orderId !== ro.orderId);
+                }
+                // Refetch balance after cancellations
+                try {
+                  const freshBalance = await kalshiAuthGet<{ balance: number }>("/portfolio/balance", apiKey, privateKey);
+                  contractCount = Math.max(1, Math.floor(freshBalance.balance / priceInCents));
+                  logger.info({ freshBalanceCents: freshBalance.balance, priceInCents, contractCount }, "Recalculated contracts after cancellations");
+                } catch { /* keep existing contractCount */ }
+                response = await placeOrder(contractCount);
+              } else {
+                throw firstErr;
+              }
+            }
 
             // Determine how many contracts were actually filled immediately
             const fillCountFp = parseFloat(response?.order?.fill_count_fp ?? String(contractCount));
@@ -742,8 +815,12 @@ async function runLoop(
 
             if (filledCount === 0) {
               // Order placed but nothing filled yet — resting in the book.
-              // Kalshi will cancel it at expiry and refund the reserved funds.
-              logger.warn({ ticker, orderId: response?.order?.order_id }, "Order resting with 0 fills — not tracking as position");
+              // Track it so we can cancel it when the market expires and free the reserved balance.
+              const orderId = response?.order?.order_id;
+              if (orderId) {
+                state.restingOrders.push({ ticker, orderId, priceInCents, count: contractCount });
+              }
+              logger.warn({ ticker, orderId, reservedCents: contractCount * priceInCents }, "Order resting with 0 fills — tracked for cancellation at expiry");
             } else {
               // Use the exact order price (floored cents) — not the raw orderbook price
               const exactBoughtAt = priceInCents / 100;
