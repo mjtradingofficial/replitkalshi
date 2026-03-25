@@ -5,38 +5,66 @@ import {
   stopBot,
   type StopLossTier,
 } from "../lib/kalshi-bot";
+import { getSettlementsFromDb, getTradesFromDb } from "../lib/db";
 
 const router: IRouter = Router();
 
-router.get("/bot/status", (_req, res) => {
+router.get("/bot/status", async (_req, res) => {
   const state = getBotState();
-  const totalClosed = state.winCount + state.lossCount;
+
+  // Pull lifetime stats from DB so they survive restarts
+  let totalTrades = state.totalTrades;
+  let winCount = state.winCount;
+  let lossCount = state.lossCount;
+  let totalPnlCents = state.totalPnlCents;
+  try {
+    const settlements = await getSettlementsFromDb();
+    winCount = settlements.filter((s) => s.won).length;
+    lossCount = settlements.filter((s) => !s.won).length;
+    totalPnlCents = settlements.reduce((sum, s) => sum + s.totalPnlCents, 0);
+    const trades = await getTradesFromDb();
+    totalTrades = trades.filter((t) => t.action === "buy").length;
+  } catch {
+    // Fall back to in-memory if DB unavailable
+  }
+
+  const totalClosed = winCount + lossCount;
   res.json({
     status: state.status,
     startedAt: state.startedAt,
     currentMarket: state.currentMarket,
     lastPollAt: state.lastPollAt,
     lastError: state.lastError,
-    totalTrades: state.totalTrades,
+    totalTrades,
     tradedMarkets: state.tradedMarkets,
     openPositions: state.openPositions,
     useStopLoss: state.useStopLoss,
     stopLossTiers: state.stopLossTiers,
-    totalPnlCents: state.totalPnlCents,
-    winCount: state.winCount,
-    lossCount: state.lossCount,
-    accuracy: totalClosed > 0 ? state.winCount / totalClosed : null,
+    totalPnlCents,
+    winCount,
+    lossCount,
+    accuracy: totalClosed > 0 ? winCount / totalClosed : null,
   });
 });
 
-router.get("/bot/settlements", (_req, res) => {
-  const state = getBotState();
-  res.json({ settlements: state.settlements });
+router.get("/bot/settlements", async (_req, res) => {
+  try {
+    const settlements = await getSettlementsFromDb();
+    res.json({ settlements });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
 });
 
-router.get("/bot/trades", (_req, res) => {
-  const state = getBotState();
-  res.json({ trades: state.trades });
+router.get("/bot/trades", async (_req, res) => {
+  try {
+    const trades = await getTradesFromDb();
+    res.json({ trades });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
 });
 
 router.post("/bot/start", (req, res) => {
