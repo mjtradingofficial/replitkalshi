@@ -68,6 +68,7 @@ export interface MarketInfo {
 export interface RestingOrder {
   ticker: string;
   orderId: string;
+  side: "yes" | "no";
   priceInCents: number;
   count: number;
 }
@@ -518,18 +519,62 @@ async function runLoop(
         timeLeftSeconds: (new Date(m.close_time).getTime() - now.getTime()) / 1000,
       }));
 
-      // --- Cancel expired resting orders so reserved funds are freed ---
+      // --- Poll resting orders: detect late fills, cancel expired ones ---
       if (state.restingOrders.length > 0) {
         for (const ro of [...state.restingOrders]) {
+          // Poll Kalshi for the current fill count on this order
+          let filledCount = 0;
+          try {
+            const orderStatus = await kalshiAuthGet<{
+              order?: { fill_count_fp?: string; status?: string };
+            }>(`/portfolio/orders/${ro.orderId}`, apiKey, privateKey);
+            const fp = parseFloat(orderStatus?.order?.fill_count_fp ?? "0");
+            filledCount = isNaN(fp) ? 0 : Math.floor(fp);
+          } catch (pollErr) {
+            const msg = pollErr instanceof Error ? pollErr.message : String(pollErr);
+            // 404 = already gone; ignore. Other errors: log and move on.
+            if (!msg.includes("404")) {
+              logger.warn({ orderId: ro.orderId, err: msg }, "Could not poll resting order status");
+            }
+          }
+
+          if (filledCount > 0) {
+            // Order filled (fully or partially) after initial placement — create position now
+            const exactBoughtAt = ro.priceInCents / 100;
+            const trade: Trade = {
+              id: `${ro.ticker}-${ro.side}-late-fill-${Date.now()}`,
+              ticker: ro.ticker,
+              side: ro.side,
+              action: "buy",
+              price: exactBoughtAt,
+              count: filledCount,
+              timestamp: new Date().toISOString(),
+              response: { filledCount, note: "late fill detected via polling" },
+            };
+            recordTrade(trade);
+            state.totalTrades += 1;
+            state.openPositions.push({
+              ticker: ro.ticker,
+              side: ro.side,
+              totalCount: filledCount,
+              remaining: filledCount,
+              boughtAt: exactBoughtAt,
+              triggeredTiers: new Array(stopLossTiers.length).fill(false),
+              stopLossPnlCents: 0,
+            });
+            state.restingOrders = state.restingOrders.filter((r) => r.orderId !== ro.orderId);
+            logger.info({ ticker: ro.ticker, orderId: ro.orderId, filledCount, priceInCents: ro.priceInCents }, "Late fill detected — position created and stop loss tracking started");
+            continue;
+          }
+
+          // Not filled — cancel if market has expired
           const mkt = withTiming.find((w) => w.market.ticker === ro.ticker);
           if (!mkt || mkt.timeLeftSeconds <= 0) {
-            // Market expired — cancel the resting order if still open
             try {
               await kalshiDelete(`/portfolio/orders/${ro.orderId}`, apiKey, privateKey);
               logger.info({ ticker: ro.ticker, orderId: ro.orderId }, "Cancelled expired resting order — balance freed");
             } catch (delErr) {
               const msg = delErr instanceof Error ? delErr.message : String(delErr);
-              // 404 means already cancelled by Kalshi at expiry — that's fine
               if (!msg.includes("404")) {
                 logger.warn({ ticker: ro.ticker, orderId: ro.orderId, err: msg }, "Could not cancel resting order (may already be gone)");
               }
@@ -834,7 +879,7 @@ async function runLoop(
               // Track it so we can cancel it when the market expires and free the reserved balance.
               const orderId = response?.order?.order_id;
               if (orderId) {
-                state.restingOrders.push({ ticker, orderId, priceInCents, count: contractCount });
+                state.restingOrders.push({ ticker, orderId, side: tradeSide, priceInCents, count: contractCount });
               }
               logger.warn({ ticker, orderId, reservedCents: contractCount * priceInCents }, "Order resting with 0 fills — tracked for cancellation at expiry");
             } else {
