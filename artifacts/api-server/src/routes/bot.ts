@@ -5,7 +5,7 @@ import {
   stopBot,
   type StopLossTier,
 } from "../lib/kalshi-bot";
-import { getSettlementsFromDb, getTradesFromDb } from "../lib/db";
+import { getSettlementsFromDb, getTradesFromDb, getPool } from "../lib/db";
 
 const router: IRouter = Router();
 
@@ -101,6 +101,50 @@ router.post("/bot/start", (req, res) => {
 router.post("/bot/stop", (_req, res) => {
   stopBot();
   res.json({ success: true, message: "Stop signal sent" });
+});
+
+// Temporary one-time migration endpoint — copies dev DB data into this DB
+router.post("/bot/admin/import-history", async (req, res) => {
+  const token = req.headers["x-migrate-token"];
+  if (token !== "kalshi-history-import-2026") {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+  const body = req.body as {
+    settlements?: Record<string, unknown>[];
+    trades?: Record<string, unknown>[];
+  };
+  const db = getPool();
+  let settlementsInserted = 0;
+  let tradesInserted = 0;
+  try {
+    for (const s of body.settlements ?? []) {
+      const r = await db.query(
+        `INSERT INTO settlements
+           (ticker, side, result, won, buy_price_cents, total_bought, sold_via_stop_loss,
+            settled_count, stop_loss_pnl_cents, settlement_pnl_cents, total_pnl_cents, settled_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         ON CONFLICT (ticker) DO NOTHING`,
+        [s.ticker, s.side, s.result, s.won, s.buy_price_cents, s.total_bought,
+         s.sold_via_stop_loss, s.settled_count, s.stop_loss_pnl_cents,
+         s.settlement_pnl_cents, s.total_pnl_cents, s.settled_at]
+      );
+      settlementsInserted += r.rowCount ?? 0;
+    }
+    for (const t of body.trades ?? []) {
+      const r = await db.query(
+        `INSERT INTO trades (id, ticker, side, action, price, count, timestamp)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (id) DO NOTHING`,
+        [t.id, t.ticker, t.side, t.action, t.price, t.count, t.timestamp]
+      );
+      tradesInserted += r.rowCount ?? 0;
+    }
+    res.json({ success: true, settlementsInserted, tradesInserted });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
 });
 
 export default router;
