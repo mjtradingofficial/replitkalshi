@@ -602,6 +602,7 @@ async function runLoop(
           // Not filled — cancel if market has expired
           const mkt = withTiming.find((w) => w.market.ticker === ro.ticker);
           if (!mkt || mkt.timeLeftSeconds <= 0) {
+            let marketClosedFill = false;
             try {
               await kalshiDelete(`/portfolio/orders/${ro.orderId}`, apiKey, privateKey);
               logger.info({ ticker: ro.ticker, orderId: ro.orderId }, "Cancelled expired resting order — balance freed");
@@ -609,6 +610,51 @@ async function runLoop(
               const msg = delErr instanceof Error ? delErr.message : String(delErr);
               if (!msg.includes("404")) {
                 logger.warn({ ticker: ro.ticker, orderId: ro.orderId, err: msg }, "Could not cancel resting order (may already be gone)");
+              }
+              // Market closed before we could cancel — do a final fill check in case it filled at close
+              if (msg.includes("market_closed")) {
+                try {
+                  const finalStatus = await kalshiAuthGet<{
+                    order?: { fill_count_fp?: string };
+                  }>(`/portfolio/orders/${ro.orderId}`, apiKey, privateKey);
+                  const fp = parseFloat(finalStatus?.order?.fill_count_fp ?? "0");
+                  const closeFill = isNaN(fp) ? 0 : Math.floor(fp);
+                  if (closeFill > 0) {
+                    marketClosedFill = true;
+                    const exactBoughtAt = ro.priceInCents / 100;
+                    const closeTrade: Trade = {
+                      id: `${ro.ticker}-${ro.side}-close-fill-${Date.now()}`,
+                      ticker: ro.ticker,
+                      side: ro.side,
+                      action: "buy",
+                      price: exactBoughtAt,
+                      count: closeFill,
+                      timestamp: new Date().toISOString(),
+                      response: { closeFill, note: "fill detected at market close" },
+                    };
+                    recordTrade(closeTrade);
+                    state.totalTrades += 1;
+                    logger.info(
+                      { ticker: ro.ticker, orderId: ro.orderId, closeFill, priceInCents: ro.priceInCents },
+                      "Fill detected at market close — trade recorded",
+                    );
+                    // Position already closed (market expired), so we settle immediately
+                    const closePos: Position = {
+                      ticker: ro.ticker,
+                      side: ro.side,
+                      totalCount: closeFill,
+                      remaining: closeFill,
+                      boughtAt: exactBoughtAt,
+                      triggeredTiers: new Array(stopLossTiers.length).fill(false),
+                      stopLossPnlCents: 0,
+                    };
+                    void settlePosition(closePos);
+                  } else {
+                    logger.info({ ticker: ro.ticker, orderId: ro.orderId }, "Resting order confirmed unfilled at market close — discarding");
+                  }
+                } catch (finalErr) {
+                  logger.warn({ orderId: ro.orderId, err: String(finalErr) }, "Final fill check failed after market_closed cancel error");
+                }
               }
             }
             state.restingOrders = state.restingOrders.filter((r) => r.orderId !== ro.orderId);
