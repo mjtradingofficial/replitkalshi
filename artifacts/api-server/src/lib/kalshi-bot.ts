@@ -405,16 +405,17 @@ async function settlePosition(pos: Position): Promise<void> {
     return;
   }
 
-  const won = result === pos.side;
   const buyPriceCents = Math.min(99, Math.max(1, Math.floor(pos.boughtAt * 100)));
   const soldViaStopLoss = pos.totalCount - pos.remaining;
   const settledCount = pos.remaining;
 
-  const settlementPnlCents = won
+  const marketWon = result === pos.side;
+  const settlementPnlCents = marketWon
     ? (100 - buyPriceCents) * settledCount
     : -buyPriceCents * settledCount;
 
   const totalPnlCents = pos.stopLossPnlCents + settlementPnlCents;
+  const won = totalPnlCents >= 0;
 
   const settlement: Settlement = {
     ticker: pos.ticker,
@@ -441,6 +442,37 @@ async function settlePosition(pos: Position): Promise<void> {
   logger.info(
     { ticker: pos.ticker, result, won, totalPnlCents, settlementPnlCents, stopLossPnlCents: pos.stopLossPnlCents },
     "Position settled",
+  );
+}
+
+async function settlePositionFullStopLoss(pos: Position): Promise<void> {
+  const buyPriceCents = Math.min(99, Math.max(1, Math.floor(pos.boughtAt * 100)));
+  const totalPnlCents = pos.stopLossPnlCents;
+
+  const settlement: Settlement = {
+    ticker: pos.ticker,
+    side: pos.side,
+    result: pos.side === "yes" ? "no" : "yes",
+    won: false,
+    buyPriceCents,
+    totalBought: pos.totalCount,
+    soldViaStopLoss: pos.totalCount,
+    settledCount: 0,
+    stopLossPnlCents: pos.stopLossPnlCents,
+    settlementPnlCents: 0,
+    totalPnlCents,
+    settledAt: new Date().toISOString(),
+  };
+
+  state.settlements.unshift(settlement);
+  state.totalPnlCents += totalPnlCents;
+  state.lossCount += 1;
+
+  void dbSaveSettlement(settlement);
+
+  logger.info(
+    { ticker: pos.ticker, totalPnlCents, stopLossPnlCents: pos.stopLossPnlCents },
+    "Position fully stopped out — recorded as loss",
   );
 }
 
@@ -668,6 +700,7 @@ async function runLoop(
 
             if (pos.remaining <= 0) {
               state.openPositions = state.openPositions.filter((p) => p.ticker !== pos.ticker);
+              void settlePositionFullStopLoss(pos);
             }
           } catch {
             // ignore price fetch error for this position tick
