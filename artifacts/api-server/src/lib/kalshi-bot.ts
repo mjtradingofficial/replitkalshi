@@ -225,7 +225,9 @@ async function kalshiAuthGet<T>(
   apiKey: string,
   privateKey: crypto.KeyObject,
 ): Promise<T> {
-  const headers = signRequest("GET", path, "", apiKey, privateKey);
+  // Sign only the path portion (no query string) — Kalshi's auth spec excludes query params
+  const pathForSigning = path.split("?")[0];
+  const headers = signRequest("GET", pathForSigning, "", apiKey, privateKey);
   const res = await fetch(`${BASE_URL}${path}`, { headers });
   if (!res.ok) {
     const text = await res.text();
@@ -781,20 +783,34 @@ async function runLoop(
               response = await placeOrder(contractCount);
             } catch (firstErr) {
               const msg = firstErr instanceof Error ? firstErr.message : String(firstErr);
-              if (msg.includes("insufficient_balance") && state.restingOrders.length > 0) {
-                // Cancel all resting orders to free reserved funds, then recalculate and retry
-                logger.warn({ ticker, restingCount: state.restingOrders.length }, "insufficient_balance — cancelling resting orders and retrying");
-                for (const ro of [...state.restingOrders]) {
-                  try {
-                    await kalshiDelete(`/portfolio/orders/${ro.orderId}`, apiKey, privateKey);
-                    logger.info({ orderId: ro.orderId, ticker: ro.ticker }, "Cancelled resting order to free balance");
-                  } catch (delErr) {
-                    const delMsg = delErr instanceof Error ? delErr.message : String(delErr);
-                    if (!delMsg.includes("404")) logger.warn({ orderId: ro.orderId, err: delMsg }, "Could not cancel resting order");
+              if (msg.includes("insufficient_balance")) {
+                // Query Kalshi directly for ALL open/resting orders (handles cases where
+                // in-memory state is empty due to restart, or another server instance placed them)
+                logger.warn({ ticker }, "insufficient_balance — fetching all open orders from Kalshi to cancel");
+                try {
+                  const openOrders = await kalshiAuthGet<{ orders?: { order_id?: string; ticker?: string; status?: string }[] }>(
+                    "/portfolio/orders?status=resting",
+                    apiKey,
+                    privateKey,
+                  );
+                  const toCancel = openOrders?.orders ?? [];
+                  logger.info({ count: toCancel.length }, "Resting orders found on Kalshi");
+                  for (const o of toCancel) {
+                    if (!o.order_id) continue;
+                    try {
+                      await kalshiDelete(`/portfolio/orders/${o.order_id}`, apiKey, privateKey);
+                      logger.info({ orderId: o.order_id, orderTicker: o.ticker }, "Cancelled Kalshi resting order to free balance");
+                    } catch (delErr) {
+                      const delMsg = delErr instanceof Error ? delErr.message : String(delErr);
+                      if (!delMsg.includes("404")) logger.warn({ orderId: o.order_id, err: delMsg }, "Could not cancel resting order");
+                    }
+                    // Remove from local state too if present
+                    state.restingOrders = state.restingOrders.filter((r) => r.orderId !== o.order_id);
                   }
-                  state.restingOrders = state.restingOrders.filter((r) => r.orderId !== ro.orderId);
+                } catch (listErr) {
+                  logger.warn({ err: String(listErr) }, "Could not list resting orders — will retry order anyway");
                 }
-                // Refetch balance after cancellations
+                // Refetch true available balance after cancellations
                 try {
                   const freshBalance = await kalshiAuthGet<{ balance: number }>("/portfolio/balance", apiKey, privateKey);
                   contractCount = Math.max(1, Math.floor(freshBalance.balance / priceInCents));
@@ -910,6 +926,31 @@ export async function startBot(config: BotConfig = {}): Promise<void> {
   } = config;
 
   await initializeFromDb();
+
+  // Cancel any resting orders left over from previous runs so reserved funds are freed immediately
+  try {
+    const openOrders = await kalshiAuthGet<{ orders?: { order_id?: string; ticker?: string }[] }>(
+      "/portfolio/orders?status=resting",
+      apiKey,
+      privateKey,
+    );
+    const toCancel = openOrders?.orders ?? [];
+    if (toCancel.length > 0) {
+      logger.warn({ count: toCancel.length }, "Cancelling leftover resting orders from previous runs");
+      for (const o of toCancel) {
+        if (!o.order_id) continue;
+        try {
+          await kalshiDelete(`/portfolio/orders/${o.order_id}`, apiKey, privateKey);
+          logger.info({ orderId: o.order_id, ticker: o.ticker }, "Cancelled leftover resting order on startup");
+        } catch (delErr) {
+          const msg = delErr instanceof Error ? delErr.message : String(delErr);
+          if (!msg.includes("404")) logger.warn({ orderId: o.order_id, err: msg }, "Could not cancel leftover order on startup");
+        }
+      }
+    }
+  } catch (startupErr) {
+    logger.warn({ err: String(startupErr) }, "Could not list resting orders on startup — continuing anyway");
+  }
 
   stopRequested = false;
   state.status = "running";
