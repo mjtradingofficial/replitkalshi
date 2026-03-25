@@ -66,6 +66,7 @@ export function SettlementHistory({ noHeader }: { noHeader?: boolean }) {
                 <th className="py-3 px-5 font-semibold">Time</th>
                 <th className="py-3 px-5 font-semibold">Ticker</th>
                 <th className="py-3 px-5 font-semibold">Side</th>
+                <th className="py-3 px-5 font-semibold text-right">Bought At</th>
                 <th className="py-3 px-5 font-semibold">Result</th>
                 <th className="py-3 px-5 font-semibold">Outcome</th>
                 <th className="py-3 px-5 font-semibold text-right">Contracts</th>
@@ -93,6 +94,9 @@ export function SettlementHistory({ noHeader }: { noHeader?: boolean }) {
                     )}>
                       {s.side.toUpperCase()}
                     </span>
+                  </td>
+                  <td className="py-3 px-5 text-right text-xs font-bold text-primary">
+                    {s.buyPriceCents}¢
                   </td>
                   <td className="py-3 px-5">
                     <span className="text-xs text-muted-foreground">
