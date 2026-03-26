@@ -996,11 +996,21 @@ async function runLoop(
       }
 
       // --- Buy check ---
-      for (const { market, timeLeftSeconds } of inWindow) {
+      for (const { market, timeLeftSeconds, closeAt } of inWindow) {
         if (stopRequested) break;
         const ticker = market.ticker;
 
         if (state.tradedMarkets.includes(ticker)) continue;
+
+        // Re-check time-to-expiry using a fresh clock reading — the stale `timeLeftSeconds`
+        // computed at the top of the loop can be many seconds old by the time we reach here
+        // (resting-order polling + stop-loss monitoring all run first). This is the root cause
+        // of entries happening with < 5 s left when the original reading said > 15 s.
+        const freshTimeLeft = (closeAt.getTime() - Date.now()) / 1000;
+        if (freshTimeLeft < minTimeLeftSeconds) {
+          logger.info({ ticker, freshTimeLeft: Math.round(freshTimeLeft), minTimeLeftSeconds }, "Skipping: market too close to expiry (fresh check)");
+          continue;
+        }
 
         const { yesPrice, noPrice } = await getOrderbookPrices(ticker);
         const { yesEma, noEma } = updateEma(ticker, yesPrice, noPrice);
@@ -1012,7 +1022,7 @@ async function runLoop(
         logger.info(
           {
             ticker,
-            timeLeftSeconds: Math.round(timeLeftSeconds),
+            timeLeftSeconds: Math.round(freshTimeLeft),
             yesPrice,
             noPrice,
             yesEma: Math.round(yesEma * 1000) / 1000,
@@ -1026,9 +1036,7 @@ async function runLoop(
         let tradeSide: "yes" | "no" | null = null;
         let tradePrice = 0;
 
-        if (timeLeftSeconds < minTimeLeftSeconds) {
-          // Too close to expiry — not enough time for stop-losses to execute safely
-        } else if (yesPrice !== null && yesPrice >= threshold && yesEma >= emaThreshold) {
+        if (yesPrice !== null && yesPrice >= threshold && yesEma >= emaThreshold) {
           tradeSide = "yes";
           tradePrice = yesPrice;
         } else if (noPrice !== null && noPrice >= threshold && noEma >= emaThreshold) {
@@ -1054,8 +1062,15 @@ async function runLoop(
             logger.warn({ err: balErr }, "Could not fetch balance, using fallback tradeSize");
           }
 
+          // Final time check right before sending the order — balance fetch adds latency
+          const preOrderTimeLeft = (closeAt.getTime() - Date.now()) / 1000;
+          if (preOrderTimeLeft < minTimeLeftSeconds) {
+            logger.warn({ ticker, preOrderTimeLeft: Math.round(preOrderTimeLeft), minTimeLeftSeconds }, "Aborting entry: market too close to expiry at order time");
+            continue;
+          }
+
           logger.info(
-            { ticker, side: tradeSide, price: tradePrice, priceInCents, count: contractCount },
+            { ticker, side: tradeSide, price: tradePrice, priceInCents, count: contractCount, secondsToExpiry: Math.round(preOrderTimeLeft) },
             "Placing order",
           );
 
@@ -1236,7 +1251,7 @@ export async function startBot(config: BotConfig = {}): Promise<void> {
     stopLossTiers = DEFAULT_STOP_LOSS_TIERS,
     emaAlpha = 0.2,
     emaThreshold = 0.88,
-    minTimeLeftSeconds = 15,
+    minTimeLeftSeconds = 30,
     useTrailingStop = false,
     trailingStopCents = 5,
   } = config;
