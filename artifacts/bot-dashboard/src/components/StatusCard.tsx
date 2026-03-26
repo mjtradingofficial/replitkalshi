@@ -106,7 +106,7 @@ export function StatusCard() {
   const [checkIntervalMs, setCheckIntervalMs] = useState(500);
   const [minTimeLeftSeconds, setMinTimeLeftSeconds] = useState(30);
   const [emaAlpha, setEmaAlpha] = useState(0.2);
-  const [emaThreshold, setEmaThreshold] = useState(88);
+  const [emaThreshold, setEmaThreshold] = useState(0);
   const [useAllBalance, setUseAllBalance] = useState(false);
   const [tradeSize, setTradeSize] = useState(10);
   const [useStopLoss, setUseStopLoss] = useState(true);
