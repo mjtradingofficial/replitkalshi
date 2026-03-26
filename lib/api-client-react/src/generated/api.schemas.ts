@@ -104,6 +104,8 @@ export interface BotStartConfig {
   emaAlpha?: number;
   /** EMA must reach this value before entry fires (default 0.88) */
   emaThreshold?: number;
+  /** Refuse entry if fewer than this many seconds remain before expiry (default 15) */
+  minTimeLeftSeconds?: number;
 }
 
 export interface BotActionResponse {

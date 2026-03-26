@@ -102,6 +102,7 @@ export function StatusCard() {
   const [thresholdCents, setThresholdCents] = useState(97);
   const [windowSeconds, setWindowSeconds] = useState(180);
   const [checkIntervalMs, setCheckIntervalMs] = useState(500);
+  const [minTimeLeftSeconds, setMinTimeLeftSeconds] = useState(15);
   const [useAllBalance, setUseAllBalance] = useState(false);
   const [tradeSize, setTradeSize] = useState(10);
   const [useStopLoss, setUseStopLoss] = useState(true);
@@ -135,6 +136,7 @@ export function StatusCard() {
         thresholdCents,
         windowSeconds,
         checkIntervalMs,
+        minTimeLeftSeconds,
         useAllBalance,
         tradeSize: useAllBalance ? undefined : tradeSize,
         useStopLoss,
@@ -315,6 +317,23 @@ export function StatusCard() {
                     max={5000}
                   />
                   <span className="text-muted-foreground text-sm shrink-0">ms</span>
+                </div>
+              </div>
+
+              <div>
+                <FieldLabel>
+                  Min. Time Remaining{" "}
+                  <Hint text="Bob will not enter a trade if there are fewer than this many seconds before the contract expires. Prevents last-second buys where stop-losses can't execute properly." />
+                </FieldLabel>
+                <div className="flex items-center gap-2">
+                  <NumberInput
+                    value={minTimeLeftSeconds}
+                    onChange={(v) => setMinTimeLeftSeconds(Math.max(1, v))}
+                    min={1}
+                  />
+                  <span className="text-muted-foreground text-sm shrink-0">
+                    sec ({Math.floor(minTimeLeftSeconds / 60)}m {minTimeLeftSeconds % 60}s)
+                  </span>
                 </div>
               </div>
 

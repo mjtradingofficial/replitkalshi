@@ -544,6 +544,7 @@ async function runLoop(
   apiKey: string,
   privateKey: crypto.KeyObject,
   tradeSize: number,
+  useAllBalance: boolean,
   threshold: number,
   windowSeconds: number,
   checkIntervalMs: number,
@@ -551,6 +552,7 @@ async function runLoop(
   stopLossTiers: StopLossTier[],
   emaAlpha: number,
   emaThreshold: number,
+  minTimeLeftSeconds: number,
 ): Promise<void> {
   // Per-market EMA state: initialised to 0.5 (neutral) so a first-poll spike never fires
   const emaMap = new Map<string, { yesEma: number; noEma: number }>();
@@ -992,7 +994,9 @@ async function runLoop(
         let tradeSide: "yes" | "no" | null = null;
         let tradePrice = 0;
 
-        if (yesPrice !== null && yesPrice >= threshold && yesEma >= emaThreshold) {
+        if (timeLeftSeconds < minTimeLeftSeconds) {
+          // Too close to expiry — not enough time for stop-losses to execute safely
+        } else if (yesPrice !== null && yesPrice >= threshold && yesEma >= emaThreshold) {
           tradeSide = "yes";
           tradePrice = yesPrice;
         } else if (noPrice !== null && noPrice >= threshold && noEma >= emaThreshold) {
@@ -1166,8 +1170,9 @@ export interface BotConfig {
   checkIntervalMs?: number;
   useStopLoss?: boolean;
   stopLossTiers?: StopLossTier[];
-  emaAlpha?: number;      // EMA smoothing factor 0–1 (default 0.2; lower = smoother/slower)
-  emaThreshold?: number;  // EMA must reach this value before entry fires (default 0.88)
+  emaAlpha?: number;           // EMA smoothing factor 0–1 (default 0.2; lower = smoother/slower)
+  emaThreshold?: number;       // EMA must reach this value before entry fires (default 0.88)
+  minTimeLeftSeconds?: number; // refuse entry if fewer than this many seconds remain (default 15)
 }
 
 export async function startBot(config: BotConfig = {}): Promise<void> {
@@ -1195,6 +1200,7 @@ export async function startBot(config: BotConfig = {}): Promise<void> {
     stopLossTiers = DEFAULT_STOP_LOSS_TIERS,
     emaAlpha = 0.2,
     emaThreshold = 0.88,
+    minTimeLeftSeconds = 15,
   } = config;
 
   await initializeFromDb();
@@ -1240,6 +1246,7 @@ export async function startBot(config: BotConfig = {}): Promise<void> {
     apiKey,
     privateKey,
     tradeSize,
+    useAllBalance,
     threshold,
     windowSeconds,
     checkIntervalMs,
@@ -1247,6 +1254,7 @@ export async function startBot(config: BotConfig = {}): Promise<void> {
     stopLossTiers,
     emaAlpha,
     emaThreshold,
+    minTimeLeftSeconds,
   ).catch((err) => {
     state.status = "error";
     state.lastError = err instanceof Error ? err.message : String(err);
