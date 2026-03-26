@@ -82,6 +82,7 @@ router.post("/bot/start", (req, res) => {
     useTrailingStop?: boolean;
     trailingStopCents?: number;
     maxEntryPriceCents?: number;
+    maxTriggerPriceCents?: number;
   };
 
   const threshold = body.thresholdCents != null
@@ -102,6 +103,7 @@ router.post("/bot/start", (req, res) => {
     useTrailingStop: body.useTrailingStop,
     trailingStopCents: body.trailingStopCents,
     maxEntryPriceCents: body.maxEntryPriceCents,
+    maxTriggerPriceCents: body.maxTriggerPriceCents,
   })
     .then(() => {
       res.json({ success: true, message: "Bot started" });

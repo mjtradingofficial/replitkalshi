@@ -112,6 +112,8 @@ export interface BotStartConfig {
   trailingStopCents?: number;
   /** Sweep the order book up to this price per contract (default 99). The trigger threshold is still the entry signal; this only controls the order ceiling. */
   maxEntryPriceCents?: number;
+  /** Refuse entry if the spot price exceeds this value in cents (default 97). Prevents entering at 98–99¢ where risk-reward is terrible. */
+  maxTriggerPriceCents?: number;
 }
 
 export interface BotActionResponse {

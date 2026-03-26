@@ -101,6 +101,7 @@ export function StatusCard() {
   const [isConfigOpen, setIsConfigOpen] = useState(false);
   const [thresholdCents, setThresholdCents] = useState(97);
   const [maxEntryPriceCents, setMaxEntryPriceCents] = useState(99);
+  const [maxTriggerPriceCents, setMaxTriggerPriceCents] = useState(97);
   const [windowSeconds, setWindowSeconds] = useState(180);
   const [checkIntervalMs, setCheckIntervalMs] = useState(500);
   const [minTimeLeftSeconds, setMinTimeLeftSeconds] = useState(30);
@@ -140,6 +141,7 @@ export function StatusCard() {
       data: {
         thresholdCents,
         maxEntryPriceCents,
+        maxTriggerPriceCents,
         windowSeconds,
         checkIntervalMs,
         minTimeLeftSeconds,
@@ -295,6 +297,29 @@ export function StatusCard() {
                   />
                   <span className="text-muted-foreground text-sm font-mono shrink-0">¢ = ${(thresholdCents / 100).toFixed(2)}</span>
                 </div>
+              </div>
+
+              <div>
+                <FieldLabel>
+                  Max Trigger Price{" "}
+                  <Hint text="The bot will NOT enter if the spot price is above this value. Default 97¢ — at 98–99¢ the max gain is only 1–2¢ per contract but the downside to stop-loss tier 1 is 7–9¢. Raising this to 99 lets the bot enter at any price ≥ threshold, which historically causes large stop-loss losses." />
+                </FieldLabel>
+                <div className="flex items-center gap-2">
+                  <NumberInput
+                    value={maxTriggerPriceCents}
+                    onChange={(v) => setMaxTriggerPriceCents(Math.min(99, Math.max(thresholdCents, v)))}
+                    min={thresholdCents}
+                    max={99}
+                  />
+                  <span className="text-muted-foreground text-sm font-mono shrink-0">
+                    ¢ — entry window: {thresholdCents}–{maxTriggerPriceCents}¢
+                  </span>
+                </div>
+                {maxTriggerPriceCents > 97 && (
+                  <p className="text-xs text-orange-400/80 mt-1.5">
+                    Warning: entries above 97¢ have poor risk-reward (max gain {100 - maxTriggerPriceCents}¢, tier-1 loss {maxTriggerPriceCents - 90}¢ or more).
+                  </p>
+                )}
               </div>
 
               <div>

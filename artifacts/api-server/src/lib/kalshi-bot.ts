@@ -564,6 +564,7 @@ async function runLoop(
   useTrailingStop: boolean,
   trailingStopCents: number,
   maxEntryPriceCents: number,
+  maxTriggerPriceCents: number,
 ): Promise<void> {
   // Per-market EMA state: initialised to 0.5 (neutral) so a first-poll spike never fires
   const emaMap = new Map<string, { yesEma: number; noEma: number }>();
@@ -1037,10 +1038,11 @@ async function runLoop(
         let tradeSide: "yes" | "no" | null = null;
         let tradePrice = 0;
 
-        if (yesPrice !== null && yesPrice >= threshold && yesEma >= emaThreshold) {
+        const maxTrigger = maxTriggerPriceCents / 100;
+        if (yesPrice !== null && yesPrice >= threshold && yesPrice <= maxTrigger && yesEma >= emaThreshold) {
           tradeSide = "yes";
           tradePrice = yesPrice;
-        } else if (noPrice !== null && noPrice >= threshold && noEma >= emaThreshold) {
+        } else if (noPrice !== null && noPrice >= threshold && noPrice <= maxTrigger && noEma >= emaThreshold) {
           tradeSide = "no";
           tradePrice = noPrice;
         }
@@ -1233,6 +1235,7 @@ export interface BotConfig {
   useTrailingStop?: boolean;    // when true, use trailing stop instead of tiered stop-loss
   trailingStopCents?: number;   // how many cents below peak to trigger trailing stop (default 5)
   maxEntryPriceCents?: number;  // sweep the book up to this price per contract (default 99); trigger price is still the signal
+  maxTriggerPriceCents?: number; // refuse entry if spot price exceeds this (default 97); blocks bad-risk 99¢ entries
 }
 
 export async function startBot(config: BotConfig = {}): Promise<void> {
@@ -1264,6 +1267,7 @@ export async function startBot(config: BotConfig = {}): Promise<void> {
     useTrailingStop = false,
     trailingStopCents = 5,
     maxEntryPriceCents = 99,
+    maxTriggerPriceCents = 97,
   } = config;
 
   await initializeFromDb();
@@ -1303,7 +1307,7 @@ export async function startBot(config: BotConfig = {}): Promise<void> {
   state.trailingStopCents = trailingStopCents;
 
   logger.info(
-    { tradeSize, threshold, windowSeconds, checkIntervalMs, useStopLoss, stopLossTiers, emaAlpha, emaThreshold, minTimeLeftSeconds, useTrailingStop, trailingStopCents, maxEntryPriceCents },
+    { tradeSize, threshold, windowSeconds, checkIntervalMs, useStopLoss, stopLossTiers, emaAlpha, emaThreshold, minTimeLeftSeconds, useTrailingStop, trailingStopCents, maxEntryPriceCents, maxTriggerPriceCents },
     "Starting Kalshi BTC15M bot (RSA-PSS auth)",
   );
 
@@ -1323,6 +1327,7 @@ export async function startBot(config: BotConfig = {}): Promise<void> {
     useTrailingStop,
     trailingStopCents,
     maxEntryPriceCents,
+    maxTriggerPriceCents,
   ).catch((err) => {
     state.status = "error";
     state.lastError = err instanceof Error ? err.message : String(err);
