@@ -40,11 +40,11 @@ export function Modal({ isOpen, onClose, title, children, className }: ModalProp
             exit={{ opacity: 0, scale: 0.95, y: 10 }}
             transition={{ type: "spring", damping: 25, stiffness: 300 }}
             className={cn(
-              "relative w-full max-w-md glass-panel rounded-2xl overflow-hidden shadow-primary/10 shadow-2xl",
+              "relative w-full max-w-md glass-panel rounded-2xl overflow-hidden shadow-primary/10 shadow-2xl flex flex-col max-h-[90vh]",
               className
             )}
           >
-            <div className="flex items-center justify-between p-6 border-b border-card-border bg-card/50">
+            <div className="flex items-center justify-between p-6 border-b border-card-border bg-card/50 shrink-0">
               <h2 className="text-xl font-bold tracking-tight text-foreground">{title}</h2>
               <button
                 onClick={onClose}
@@ -53,7 +53,7 @@ export function Modal({ isOpen, onClose, title, children, className }: ModalProp
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <div className="p-6">{children}</div>
+            <div className="p-6 overflow-y-auto">{children}</div>
           </motion.div>
         </div>
       )}
