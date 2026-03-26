@@ -39,6 +39,8 @@ export interface Position {
   remaining: number;
   pendingSellCount: number; // contracts sent for stop-loss sell but not yet confirmed filled
   boughtAt: number;
+  peakPriceCents: number;   // highest price seen since entry (for trailing stop)
+  trailingTriggered: boolean; // true once trailing stop has fired
   triggeredTiers: boolean[];
   stopLossPnlCents: number;
 }
@@ -96,6 +98,8 @@ export interface BotState {
   settlements: Settlement[];
   useStopLoss: boolean;
   stopLossTiers: StopLossTier[];
+  useTrailingStop: boolean;
+  trailingStopCents: number;
   lastError: string | null;
   lastPollAt: string | null;
   totalTrades: number;
@@ -308,6 +312,8 @@ const state: BotState = {
   settlements: [],
   useStopLoss: true,
   stopLossTiers: DEFAULT_STOP_LOSS_TIERS,
+  useTrailingStop: false,
+  trailingStopCents: 5,
   lastError: null,
   lastPollAt: null,
   totalTrades: 0,
@@ -378,6 +384,8 @@ async function initializeFromDb(): Promise<void> {
       remaining,
       pendingSellCount: 0,
       boughtAt: buy.price,
+      peakPriceCents: Math.floor(buy.price * 100),
+      trailingTriggered: sellsForTicker.length > 0,
       triggeredTiers,
       stopLossPnlCents,
     });
@@ -553,6 +561,8 @@ async function runLoop(
   emaAlpha: number,
   emaThreshold: number,
   minTimeLeftSeconds: number,
+  useTrailingStop: boolean,
+  trailingStopCents: number,
 ): Promise<void> {
   // Per-market EMA state: initialised to 0.5 (neutral) so a first-poll spike never fires
   const emaMap = new Map<string, { yesEma: number; noEma: number }>();
@@ -627,6 +637,8 @@ async function runLoop(
               remaining: filledCount,
               pendingSellCount: 0,
               boughtAt: exactBoughtAt,
+              peakPriceCents: ro.priceInCents,
+              trailingTriggered: false,
               triggeredTiers: new Array(stopLossTiers.length).fill(false),
               stopLossPnlCents: 0,
             });
@@ -682,6 +694,8 @@ async function runLoop(
                       remaining: closeFill,
                       pendingSellCount: 0,
                       boughtAt: exactBoughtAt,
+                      peakPriceCents: ro.priceInCents,
+                      trailingTriggered: false,
                       triggeredTiers: new Array(stopLossTiers.length).fill(false),
                       stopLossPnlCents: 0,
                     };
@@ -751,7 +765,7 @@ async function runLoop(
       }
 
       // --- Stop loss monitoring ---
-      if (useStopLoss && stopLossTiers.length > 0) {
+      if (useStopLoss) {
         for (const pos of [...state.openPositions]) {
           const mkt = withTiming.find((w) => w.market.ticker === pos.ticker);
 
@@ -845,25 +859,43 @@ async function runLoop(
               }
             };
 
-            for (let i = 0; i < stopLossTiers.length; i++) {
-              const tier = stopLossTiers[i];
-              const isLastTier = i === stopLossTiers.length - 1;
-
-              if (!pos.triggeredTiers[i] && currentPrice <= tier.priceCents / 100) {
-                pos.triggeredTiers[i] = true;
-                // Only sell contracts not already sent via previous tiers
+            if (useTrailingStop) {
+              // --- Trailing stop ---
+              // Update peak price seen since entry
+              const currentPriceCents = Math.floor(currentPrice * 100);
+              if (currentPriceCents > pos.peakPriceCents) {
+                pos.peakPriceCents = currentPriceCents;
+              }
+              // Fire when price has fallen more than trailingStopCents from peak
+              if (!pos.trailingTriggered && currentPriceCents <= pos.peakPriceCents - trailingStopCents) {
+                pos.trailingTriggered = true;
                 const available = pos.remaining - pos.pendingSellCount;
-                let toSell: number;
-                if (isLastTier) {
-                  toSell = available;
-                } else {
-                  toSell = Math.min(
-                    Math.max(1, Math.floor(pos.totalCount * tier.fraction)),
-                    available,
-                  );
+                if (available > 0) {
+                  await fireSell(available, `TRAIL peak=${pos.peakPriceCents}¢ trail=${trailingStopCents}¢`);
                 }
-                if (toSell > 0) {
-                  await fireSell(toSell, `T${i + 1}@${tier.priceCents}¢`);
+              }
+            } else if (stopLossTiers.length > 0) {
+              // --- Tiered stop ---
+              for (let i = 0; i < stopLossTiers.length; i++) {
+                const tier = stopLossTiers[i];
+                const isLastTier = i === stopLossTiers.length - 1;
+
+                if (!pos.triggeredTiers[i] && currentPrice <= tier.priceCents / 100) {
+                  pos.triggeredTiers[i] = true;
+                  // Only sell contracts not already sent via previous tiers
+                  const available = pos.remaining - pos.pendingSellCount;
+                  let toSell: number;
+                  if (isLastTier) {
+                    toSell = available;
+                  } else {
+                    toSell = Math.min(
+                      Math.max(1, Math.floor(pos.totalCount * tier.fraction)),
+                      available,
+                    );
+                  }
+                  if (toSell > 0) {
+                    await fireSell(toSell, `T${i + 1}@${tier.priceCents}¢`);
+                  }
                 }
               }
             }
@@ -1131,6 +1163,8 @@ async function runLoop(
                 remaining: filledCount,
                 pendingSellCount: 0,
                 boughtAt: exactBoughtAt,
+                peakPriceCents: priceInCents,
+                trailingTriggered: false,
                 triggeredTiers: new Array(stopLossTiers.length).fill(false),
                 stopLossPnlCents: 0,
               });
@@ -1173,6 +1207,8 @@ export interface BotConfig {
   emaAlpha?: number;           // EMA smoothing factor 0–1 (default 0.2; lower = smoother/slower)
   emaThreshold?: number;       // EMA must reach this value before entry fires (default 0.88)
   minTimeLeftSeconds?: number; // refuse entry if fewer than this many seconds remain (default 15)
+  useTrailingStop?: boolean;   // when true, use trailing stop instead of tiered stop-loss
+  trailingStopCents?: number;  // how many cents below peak to trigger trailing stop (default 5)
 }
 
 export async function startBot(config: BotConfig = {}): Promise<void> {
@@ -1201,6 +1237,8 @@ export async function startBot(config: BotConfig = {}): Promise<void> {
     emaAlpha = 0.2,
     emaThreshold = 0.88,
     minTimeLeftSeconds = 15,
+    useTrailingStop = false,
+    trailingStopCents = 5,
   } = config;
 
   await initializeFromDb();
@@ -1236,9 +1274,11 @@ export async function startBot(config: BotConfig = {}): Promise<void> {
   state.lastError = null;
   state.useStopLoss = useStopLoss;
   state.stopLossTiers = stopLossTiers;
+  state.useTrailingStop = useTrailingStop;
+  state.trailingStopCents = trailingStopCents;
 
   logger.info(
-    { tradeSize, threshold, windowSeconds, checkIntervalMs, useStopLoss, stopLossTiers, emaAlpha, emaThreshold },
+    { tradeSize, threshold, windowSeconds, checkIntervalMs, useStopLoss, stopLossTiers, emaAlpha, emaThreshold, minTimeLeftSeconds, useTrailingStop, trailingStopCents },
     "Starting Kalshi BTC15M bot (RSA-PSS auth)",
   );
 
@@ -1255,6 +1295,8 @@ export async function startBot(config: BotConfig = {}): Promise<void> {
     emaAlpha,
     emaThreshold,
     minTimeLeftSeconds,
+    useTrailingStop,
+    trailingStopCents,
   ).catch((err) => {
     state.status = "error";
     state.lastError = err instanceof Error ? err.message : String(err);

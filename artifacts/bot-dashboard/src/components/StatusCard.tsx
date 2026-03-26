@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import {
-  Activity, Square, AlertTriangle, Play, Plus, Trash2, Info, ShieldOff, Shield, Wallet, Hash,
+  Activity, Square, AlertTriangle, Play, Plus, Trash2, Info, ShieldOff, Shield, Wallet, Hash, TrendingDown, ArrowDownUp,
 } from "lucide-react";
 import { useGetBotStatus, useStartBot, useStopBot } from "@workspace/api-client-react";
 import type { StopLossTier } from "@workspace/api-client-react";
@@ -103,9 +103,13 @@ export function StatusCard() {
   const [windowSeconds, setWindowSeconds] = useState(180);
   const [checkIntervalMs, setCheckIntervalMs] = useState(500);
   const [minTimeLeftSeconds, setMinTimeLeftSeconds] = useState(15);
+  const [emaAlpha, setEmaAlpha] = useState(0.2);
+  const [emaThreshold, setEmaThreshold] = useState(88);
   const [useAllBalance, setUseAllBalance] = useState(false);
   const [tradeSize, setTradeSize] = useState(10);
   const [useStopLoss, setUseStopLoss] = useState(true);
+  const [useTrailingStop, setUseTrailingStop] = useState(false);
+  const [trailingStopCents, setTrailingStopCents] = useState(5);
   const [tiers, setTiers] = useState<StopLossTier[]>(DEFAULT_TIERS);
 
   const isRunning = statusData?.status === "running";
@@ -137,10 +141,14 @@ export function StatusCard() {
         windowSeconds,
         checkIntervalMs,
         minTimeLeftSeconds,
+        emaAlpha,
+        emaThreshold: emaThreshold / 100,
         useAllBalance,
         tradeSize: useAllBalance ? undefined : tradeSize,
         useStopLoss,
-        stopLossTiers: tiers,
+        useTrailingStop,
+        trailingStopCents: useTrailingStop ? trailingStopCents : undefined,
+        stopLossTiers: useTrailingStop ? [] : tiers,
       },
     });
   };
@@ -337,6 +345,39 @@ export function StatusCard() {
                 </div>
               </div>
 
+              {/* EMA Settings */}
+              <div>
+                <FieldLabel>
+                  EMA Smoothing{" "}
+                  <Hint text="How quickly the EMA reacts to price changes. Lower = smoother (slower). Range: 0.01–1.0. Default: 0.2" />
+                </FieldLabel>
+                <div className="flex items-center gap-2">
+                  <NumberInput
+                    value={Math.round(emaAlpha * 100)}
+                    onChange={(v) => setEmaAlpha(Math.min(100, Math.max(1, v)) / 100)}
+                    min={1}
+                    max={100}
+                  />
+                  <span className="text-muted-foreground text-sm shrink-0">/ 100 (α = {emaAlpha.toFixed(2)})</span>
+                </div>
+              </div>
+
+              <div>
+                <FieldLabel>
+                  EMA Entry Threshold{" "}
+                  <Hint text="The EMA must reach this value before Bob fires an entry. Higher = more confirmation required. Default: 88¢" />
+                </FieldLabel>
+                <div className="flex items-center gap-2">
+                  <NumberInput
+                    value={emaThreshold}
+                    onChange={(v) => setEmaThreshold(Math.min(99, Math.max(1, v)))}
+                    min={1}
+                    max={99}
+                  />
+                  <span className="text-muted-foreground text-sm shrink-0">¢</span>
+                </div>
+              </div>
+
               {/* Position Size */}
               <div>
                 <FieldLabel>
@@ -424,19 +465,72 @@ export function StatusCard() {
             )}
 
             {useStopLoss && (
-              <div className="space-y-3">
-                <div className="grid grid-cols-12 gap-2 mb-1">
-                  <p className="col-span-1 text-xs text-muted-foreground">#</p>
-                  <p className="col-span-5 text-xs text-muted-foreground flex items-center gap-1">
-                    Trigger Price
-                    <Hint text="If the contract price falls to this level, the sell fires." />
-                  </p>
-                  <p className="col-span-5 text-xs text-muted-foreground flex items-center gap-1">
-                    Sell Amount
-                    <Hint text="% of your total position to sell at this tier. The last tier always sells everything remaining." />
-                  </p>
-                  <p className="col-span-1" />
+              <div className="space-y-4">
+                {/* Mode toggle: Tiered vs Trailing */}
+                <div className="flex rounded-xl border border-card-border overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setUseTrailingStop(false)}
+                    className={cn(
+                      "flex-1 flex items-center justify-center gap-2 py-2.5 text-sm font-semibold transition-all",
+                      !useTrailingStop
+                        ? "bg-orange-500/20 text-orange-400"
+                        : "bg-black/40 text-muted-foreground hover:text-foreground hover:bg-white/5"
+                    )}
+                  >
+                    <ArrowDownUp className="w-4 h-4" /> Tiered
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setUseTrailingStop(true)}
+                    className={cn(
+                      "flex-1 flex items-center justify-center gap-2 py-2.5 text-sm font-semibold transition-all",
+                      useTrailingStop
+                        ? "bg-orange-500/20 text-orange-400"
+                        : "bg-black/40 text-muted-foreground hover:text-foreground hover:bg-white/5"
+                    )}
+                  >
+                    <TrendingDown className="w-4 h-4" /> Trailing
+                  </button>
                 </div>
+
+                {/* Trailing stop config */}
+                {useTrailingStop && (
+                  <div>
+                    <FieldLabel>
+                      Trail Distance{" "}
+                      <Hint text="Liquidates 100% of position when price drops this many cents below the highest price seen since entry. Default: 5¢" />
+                    </FieldLabel>
+                    <div className="flex items-center gap-2">
+                      <NumberInput
+                        value={trailingStopCents}
+                        onChange={(v) => setTrailingStopCents(Math.max(1, v))}
+                        min={1}
+                        max={50}
+                      />
+                      <span className="text-muted-foreground text-sm shrink-0">¢ below peak</span>
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-2">
+                      Sells 100% of the position in one shot when triggered.
+                    </p>
+                  </div>
+                )}
+
+                {/* Tiered stop config */}
+                {!useTrailingStop && (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-12 gap-2 mb-1">
+                      <p className="col-span-1 text-xs text-muted-foreground">#</p>
+                      <p className="col-span-5 text-xs text-muted-foreground flex items-center gap-1">
+                        Trigger Price
+                        <Hint text="If the contract price falls to this level, the sell fires." />
+                      </p>
+                      <p className="col-span-5 text-xs text-muted-foreground flex items-center gap-1">
+                        Sell Amount
+                        <Hint text="% of your total position to sell at this tier. The last tier always sells everything remaining." />
+                      </p>
+                      <p className="col-span-1" />
+                    </div>
 
                 {tiers.map((tier, i) => {
                   const isLast = i === tiers.length - 1;
@@ -498,9 +592,11 @@ export function StatusCard() {
                   </button>
                 )}
 
-                <p className="text-xs text-muted-foreground pt-1">
-                  Tiers fire in order. The last tier always sells all remaining contracts regardless of % set.
-                </p>
+                    <p className="text-xs text-muted-foreground pt-1">
+                      Tiers fire in order. The last tier always sells all remaining contracts regardless of % set.
+                    </p>
+                  </div>
+                )}
               </div>
             )}
           </div>

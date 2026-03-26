@@ -79,6 +79,8 @@ router.post("/bot/start", (req, res) => {
     emaAlpha?: number;
     emaThreshold?: number;
     minTimeLeftSeconds?: number;
+    useTrailingStop?: boolean;
+    trailingStopCents?: number;
   };
 
   const threshold = body.thresholdCents != null
@@ -96,6 +98,8 @@ router.post("/bot/start", (req, res) => {
     emaAlpha: body.emaAlpha,
     emaThreshold: body.emaThreshold,
     minTimeLeftSeconds: body.minTimeLeftSeconds,
+    useTrailingStop: body.useTrailingStop,
+    trailingStopCents: body.trailingStopCents,
   })
     .then(() => {
       res.json({ success: true, message: "Bot started" });

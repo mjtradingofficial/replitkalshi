@@ -106,6 +106,10 @@ export interface BotStartConfig {
   emaThreshold?: number;
   /** Refuse entry if fewer than this many seconds remain before expiry (default 15) */
   minTimeLeftSeconds?: number;
+  /** When true, use a trailing stop instead of fixed tiers */
+  useTrailingStop?: boolean;
+  /** How many cents below peak price to trigger the trailing stop (default 5) */
+  trailingStopCents?: number;
 }
 
 export interface BotActionResponse {
