@@ -100,6 +100,7 @@ export function StatusCard() {
 
   const [isConfigOpen, setIsConfigOpen] = useState(false);
   const [thresholdCents, setThresholdCents] = useState(97);
+  const [maxEntryPriceCents, setMaxEntryPriceCents] = useState(99);
   const [windowSeconds, setWindowSeconds] = useState(180);
   const [checkIntervalMs, setCheckIntervalMs] = useState(500);
   const [minTimeLeftSeconds, setMinTimeLeftSeconds] = useState(30);
@@ -138,6 +139,7 @@ export function StatusCard() {
     startMutation.mutate({
       data: {
         thresholdCents,
+        maxEntryPriceCents,
         windowSeconds,
         checkIntervalMs,
         minTimeLeftSeconds,
@@ -293,6 +295,31 @@ export function StatusCard() {
                   />
                   <span className="text-muted-foreground text-sm font-mono shrink-0">¢ = ${(thresholdCents / 100).toFixed(2)}</span>
                 </div>
+              </div>
+
+              <div>
+                <FieldLabel>
+                  Max Entry Price{" "}
+                  <Hint text="The order is placed up to this price to sweep the order book and maximise fills. Must be ≥ Entry Threshold. Set to 99 to fill everything available. The trigger threshold is still your entry signal — this only controls the order ceiling." />
+                </FieldLabel>
+                <div className="flex items-center gap-2">
+                  <NumberInput
+                    value={maxEntryPriceCents}
+                    onChange={(v) => setMaxEntryPriceCents(Math.min(99, Math.max(thresholdCents, v)))}
+                    min={thresholdCents}
+                    max={99}
+                  />
+                  <span className="text-muted-foreground text-sm font-mono shrink-0">
+                    ¢{maxEntryPriceCents > thresholdCents
+                      ? ` (+${maxEntryPriceCents - thresholdCents}¢ sweep)`
+                      : " (no sweep)"}
+                  </span>
+                </div>
+                {maxEntryPriceCents > thresholdCents && (
+                  <p className="text-xs text-primary/60 mt-1.5">
+                    Sweeps book from {thresholdCents}¢ to {maxEntryPriceCents}¢ — Kalshi fills at each maker's price, not the ceiling.
+                  </p>
+                )}
               </div>
 
               <div>

@@ -563,6 +563,7 @@ async function runLoop(
   minTimeLeftSeconds: number,
   useTrailingStop: boolean,
   trailingStopCents: number,
+  maxEntryPriceCents: number,
 ): Promise<void> {
   // Per-market EMA state: initialised to 0.5 (neutral) so a first-poll spike never fires
   const emaMap = new Map<string, { yesEma: number; noEma: number }>();
@@ -1045,7 +1046,11 @@ async function runLoop(
         }
 
         if (tradeSide) {
-          const priceInCents = Math.min(99, Math.max(1, Math.floor(tradePrice * 100)));
+          // triggerPriceCents: the price that fired the entry signal — used for P&L and position tracking
+          const triggerPriceCents = Math.min(99, Math.max(1, Math.floor(tradePrice * 100)));
+          // orderPriceCents: the price sent to Kalshi — sweeps the book up to maxEntryPriceCents
+          // Never below trigger, never above 99. Future Options B/C can refine this further.
+          const orderPriceCents = Math.min(99, Math.max(triggerPriceCents, maxEntryPriceCents));
 
           let contractCount = tradeSize;
           try {
@@ -1055,9 +1060,10 @@ async function runLoop(
               privateKey,
             );
             const balanceCents = balanceResp.balance;
-            const maxFromBalance = Math.max(1, Math.floor(balanceCents / priceInCents));
+            // Use orderPriceCents for balance calc — conservative: assumes worst-case fill price
+            const maxFromBalance = Math.max(1, Math.floor(balanceCents / orderPriceCents));
             contractCount = useAllBalance ? maxFromBalance : Math.min(tradeSize, maxFromBalance);
-            logger.info({ balanceCents, priceInCents, contractCount, useAllBalance }, "Calculated contracts from balance");
+            logger.info({ balanceCents, triggerPriceCents, orderPriceCents, contractCount, useAllBalance }, "Calculated contracts from balance");
           } catch (balErr) {
             logger.warn({ err: balErr }, "Could not fetch balance, using fallback tradeSize");
           }
@@ -1070,7 +1076,7 @@ async function runLoop(
           }
 
           logger.info(
-            { ticker, side: tradeSide, price: tradePrice, priceInCents, count: contractCount, secondsToExpiry: Math.round(preOrderTimeLeft) },
+            { ticker, side: tradeSide, triggerPrice: tradePrice, triggerPriceCents, orderPriceCents, count: contractCount, secondsToExpiry: Math.round(preOrderTimeLeft) },
             "Placing order",
           );
 
@@ -1080,9 +1086,10 @@ async function runLoop(
             side: tradeSide,
             type: "limit",
             count: contractCount,
+            // orderPriceCents sweeps the book; Kalshi fills at each maker's ask price, not this ceiling
             ...(tradeSide === "yes"
-              ? { yes_price: priceInCents }
-              : { no_price: priceInCents }),
+              ? { yes_price: orderPriceCents }
+              : { no_price: orderPriceCents }),
           };
 
           const placeOrder = async (count: number) => kalshiPost<{ order?: { fill_count_fp?: string; remaining_count_fp?: string; order_id?: string } }>(
@@ -1128,9 +1135,9 @@ async function runLoop(
                 // Refetch true available balance after cancellations
                 try {
                   const freshBalance = await kalshiAuthGet<{ balance: number }>("/portfolio/balance", apiKey, privateKey);
-                  const freshMax = Math.max(1, Math.floor(freshBalance.balance / priceInCents));
+                  const freshMax = Math.max(1, Math.floor(freshBalance.balance / orderPriceCents));
                   contractCount = useAllBalance ? freshMax : Math.min(tradeSize, freshMax);
-                  logger.info({ freshBalanceCents: freshBalance.balance, priceInCents, contractCount, useAllBalance }, "Recalculated contracts after cancellations");
+                  logger.info({ freshBalanceCents: freshBalance.balance, orderPriceCents, contractCount, useAllBalance }, "Recalculated contracts after cancellations");
                 } catch { /* keep existing contractCount */ }
                 response = await placeOrder(contractCount);
               } else {
@@ -1150,12 +1157,13 @@ async function runLoop(
               // Track it so we can cancel it when the market expires and free the reserved balance.
               const orderId = response?.order?.order_id;
               if (orderId) {
-                state.restingOrders.push({ ticker, orderId, side: tradeSide, priceInCents, count: contractCount });
+                // Store triggerPriceCents as the position's boughtAt; orderPriceCents is the book ceiling
+                state.restingOrders.push({ ticker, orderId, side: tradeSide, priceInCents: triggerPriceCents, count: contractCount });
               }
-              logger.warn({ ticker, orderId, reservedCents: contractCount * priceInCents }, "Order resting with 0 fills — tracked for cancellation at expiry");
+              logger.warn({ ticker, orderId, reservedCents: contractCount * orderPriceCents }, "Order resting with 0 fills — tracked for cancellation at expiry");
             } else {
-              // Use the exact order price (floored cents) — not the raw orderbook price
-              const exactBoughtAt = priceInCents / 100;
+              // Record boughtAt using the trigger price (signal price) — consistent with P&L tracking
+              const exactBoughtAt = triggerPriceCents / 100;
 
               const trade: Trade = {
                 id: `${ticker}-${tradeSide}-${Date.now()}`,
@@ -1178,18 +1186,18 @@ async function runLoop(
                 remaining: filledCount,
                 pendingSellCount: 0,
                 boughtAt: exactBoughtAt,
-                peakPriceCents: priceInCents,
+                peakPriceCents: triggerPriceCents,
                 trailingTriggered: false,
                 triggeredTiers: new Array(stopLossTiers.length).fill(false),
                 stopLossPnlCents: 0,
               });
 
-              logger.info({ trade, filledCount }, "Order placed and position opened");
+              logger.info({ trade, filledCount, triggerPriceCents, orderPriceCents }, "Order placed and position opened");
             }
           } catch (orderErr) {
             const msg = orderErr instanceof Error ? orderErr.message : String(orderErr);
             state.lastError = msg;
-            logger.error({ err: msg, ticker, side: tradeSide, priceInCents, contractCount }, "Order failed — will retry next check");
+            logger.error({ err: msg, ticker, side: tradeSide, triggerPriceCents, orderPriceCents, contractCount }, "Order failed — will retry next check");
           }
         }
       }
@@ -1222,8 +1230,9 @@ export interface BotConfig {
   emaAlpha?: number;           // EMA smoothing factor 0–1 (default 0.2; lower = smoother/slower)
   emaThreshold?: number;       // EMA must reach this value before entry fires (default 0.88)
   minTimeLeftSeconds?: number; // refuse entry if fewer than this many seconds remain (default 15)
-  useTrailingStop?: boolean;   // when true, use trailing stop instead of tiered stop-loss
-  trailingStopCents?: number;  // how many cents below peak to trigger trailing stop (default 5)
+  useTrailingStop?: boolean;    // when true, use trailing stop instead of tiered stop-loss
+  trailingStopCents?: number;   // how many cents below peak to trigger trailing stop (default 5)
+  maxEntryPriceCents?: number;  // sweep the book up to this price per contract (default 99); trigger price is still the signal
 }
 
 export async function startBot(config: BotConfig = {}): Promise<void> {
@@ -1254,6 +1263,7 @@ export async function startBot(config: BotConfig = {}): Promise<void> {
     minTimeLeftSeconds = 30,
     useTrailingStop = false,
     trailingStopCents = 5,
+    maxEntryPriceCents = 99,
   } = config;
 
   await initializeFromDb();
@@ -1293,7 +1303,7 @@ export async function startBot(config: BotConfig = {}): Promise<void> {
   state.trailingStopCents = trailingStopCents;
 
   logger.info(
-    { tradeSize, threshold, windowSeconds, checkIntervalMs, useStopLoss, stopLossTiers, emaAlpha, emaThreshold, minTimeLeftSeconds, useTrailingStop, trailingStopCents },
+    { tradeSize, threshold, windowSeconds, checkIntervalMs, useStopLoss, stopLossTiers, emaAlpha, emaThreshold, minTimeLeftSeconds, useTrailingStop, trailingStopCents, maxEntryPriceCents },
     "Starting Kalshi BTC15M bot (RSA-PSS auth)",
   );
 
@@ -1312,6 +1322,7 @@ export async function startBot(config: BotConfig = {}): Promise<void> {
     minTimeLeftSeconds,
     useTrailingStop,
     trailingStopCents,
+    maxEntryPriceCents,
   ).catch((err) => {
     state.status = "error";
     state.lastError = err instanceof Error ? err.message : String(err);

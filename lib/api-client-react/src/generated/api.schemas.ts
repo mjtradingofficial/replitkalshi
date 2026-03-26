@@ -110,6 +110,8 @@ export interface BotStartConfig {
   useTrailingStop?: boolean;
   /** How many cents below peak price to trigger the trailing stop (default 5) */
   trailingStopCents?: number;
+  /** Sweep the order book up to this price per contract (default 99). The trigger threshold is still the entry signal; this only controls the order ceiling. */
+  maxEntryPriceCents?: number;
 }
 
 export interface BotActionResponse {
