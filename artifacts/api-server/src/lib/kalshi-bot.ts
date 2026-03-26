@@ -37,9 +37,18 @@ export interface Position {
   side: "yes" | "no";
   totalCount: number;
   remaining: number;
+  pendingSellCount: number; // contracts sent for stop-loss sell but not yet confirmed filled
   boughtAt: number;
   triggeredTiers: boolean[];
   stopLossPnlCents: number;
+}
+
+export interface RestingSellOrder {
+  ticker: string;
+  orderId: string;
+  side: "yes" | "no";
+  priceInCents: number;
+  count: number; // contracts this sell order covers
 }
 
 export interface Settlement {
@@ -81,6 +90,7 @@ export interface BotState {
   tradedMarkets: string[];
   openPositions: Position[];
   restingOrders: RestingOrder[];
+  restingSellOrders: RestingSellOrder[];
   settlements: Settlement[];
   useStopLoss: boolean;
   stopLossTiers: StopLossTier[];
@@ -292,6 +302,7 @@ const state: BotState = {
   tradedMarkets: [],
   openPositions: [],
   restingOrders: [],
+  restingSellOrders: [],
   settlements: [],
   useStopLoss: true,
   stopLossTiers: DEFAULT_STOP_LOSS_TIERS,
@@ -310,6 +321,8 @@ export function getBotState(): BotState {
     ...state,
     trades: [...state.trades],
     openPositions: [...state.openPositions],
+    restingOrders: [...state.restingOrders],
+    restingSellOrders: [...state.restingSellOrders],
     settlements: [...state.settlements],
     stopLossTiers: [...state.stopLossTiers],
   };
@@ -361,6 +374,7 @@ async function initializeFromDb(): Promise<void> {
       side: buy.side,
       totalCount: buy.count,
       remaining,
+      pendingSellCount: 0,
       boughtAt: buy.price,
       triggeredTiers,
       stopLossPnlCents,
@@ -590,6 +604,7 @@ async function runLoop(
               side: ro.side,
               totalCount: filledCount,
               remaining: filledCount,
+              pendingSellCount: 0,
               boughtAt: exactBoughtAt,
               triggeredTiers: new Array(stopLossTiers.length).fill(false),
               stopLossPnlCents: 0,
@@ -644,6 +659,7 @@ async function runLoop(
                       side: ro.side,
                       totalCount: closeFill,
                       remaining: closeFill,
+                      pendingSellCount: 0,
                       boughtAt: exactBoughtAt,
                       triggeredTiers: new Array(stopLossTiers.length).fill(false),
                       stopLossPnlCents: 0,
@@ -658,6 +674,57 @@ async function runLoop(
               }
             }
             state.restingOrders = state.restingOrders.filter((r) => r.orderId !== ro.orderId);
+          }
+        }
+      }
+
+      // --- Poll resting stop-loss sell orders: confirm fills, cancel at expiry ---
+      if (state.restingSellOrders.length > 0) {
+        for (const rso of [...state.restingSellOrders]) {
+          let filledCount = 0;
+          try {
+            const orderStatus = await kalshiAuthGet<{
+              order?: { fill_count_fp?: string };
+            }>(`/portfolio/orders/${rso.orderId}`, apiKey, privateKey);
+            const fp = parseFloat(orderStatus?.order?.fill_count_fp ?? "0");
+            filledCount = isNaN(fp) ? 0 : Math.floor(fp);
+          } catch (pollErr) {
+            const msg = pollErr instanceof Error ? pollErr.message : String(pollErr);
+            if (!msg.includes("404")) {
+              logger.warn({ orderId: rso.orderId, err: msg }, "Could not poll resting sell order status");
+            }
+          }
+
+          const mkt = withTiming.find((w) => w.market.ticker === rso.ticker);
+          const marketExpired = !mkt || mkt.timeLeftSeconds <= 0;
+
+          if (filledCount >= rso.count || marketExpired) {
+            // Find the open position and confirm the fill
+            const pos = state.openPositions.find((p) => p.ticker === rso.ticker);
+            if (pos) {
+              const actualFilled = Math.min(filledCount, rso.count);
+              const buyPriceCents = Math.min(99, Math.max(1, Math.floor(pos.boughtAt * 100)));
+              pos.remaining -= actualFilled;
+              pos.pendingSellCount -= rso.count;
+              pos.stopLossPnlCents += (rso.priceInCents - buyPriceCents) * actualFilled;
+              if (actualFilled > 0) {
+                logger.info({ ticker: rso.ticker, orderId: rso.orderId, actualFilled }, "Resting stop-loss sell confirmed filled");
+              } else if (marketExpired) {
+                logger.warn({ ticker: rso.ticker, orderId: rso.orderId }, "Resting stop-loss sell expired unfilled — contracts will settle");
+              }
+              if (pos.remaining <= 0) {
+                state.openPositions = state.openPositions.filter((p) => p.ticker !== pos.ticker);
+                void settlePositionFullStopLoss(pos);
+              }
+            }
+            state.restingSellOrders = state.restingSellOrders.filter((r) => r.orderId !== rso.orderId);
+
+            // Cancel if market expired and sell didn't fill
+            if (marketExpired && filledCount < rso.count) {
+              try {
+                await kalshiDelete(`/portfolio/orders/${rso.orderId}`, apiKey, privateKey);
+              } catch { /* already gone */ }
+            }
           }
         }
       }
@@ -684,9 +751,10 @@ async function runLoop(
             if (currentPrice === null) continue;
 
             const fireSell = async (count: number, label: string) => {
-              const sellPriceInCents = Math.max(1, Math.floor(currentPrice * 100));
+              // Sell 2¢ below current price to cross the spread and maximise fill probability
+              const sellPriceInCents = Math.max(1, Math.floor(currentPrice * 100) - 2);
               logger.warn(
-                { ticker: pos.ticker, side: pos.side, currentPrice, count, label },
+                { ticker: pos.ticker, side: pos.side, currentPrice, sellPriceInCents, count, label },
                 `Stop loss ${label} triggered`,
               );
               const sellBody = {
@@ -700,23 +768,56 @@ async function runLoop(
                   : { no_price: sellPriceInCents }),
               };
               try {
-                const response = await kalshiPost<unknown>("/portfolio/orders", sellBody, apiKey, privateKey);
+                const response = await kalshiPost<{
+                  order?: { fill_count_fp?: string; order_id?: string };
+                }>("/portfolio/orders", sellBody, apiKey, privateKey);
+
+                const orderId = response?.order?.order_id;
+                const fp = parseFloat(response?.order?.fill_count_fp ?? "0");
+                const actualFilled = isNaN(fp) ? 0 : Math.floor(fp);
+                const buyPriceCents = Math.min(99, Math.max(1, Math.floor(pos.boughtAt * 100)));
+
                 const sellTrade: Trade = {
                   id: `${pos.ticker}-${pos.side}-sell-${Date.now()}`,
                   ticker: pos.ticker,
                   side: pos.side,
                   action: "stop-loss-sell",
-                  price: currentPrice,
+                  price: sellPriceInCents / 100,
                   count,
                   timestamp: new Date().toISOString(),
                   response,
                 };
                 recordTrade(sellTrade);
                 state.totalTrades += 1;
-                pos.remaining -= count;
-                const buyPriceCents = Math.min(99, Math.max(1, Math.floor(pos.boughtAt * 100)));
-                pos.stopLossPnlCents += (sellPriceInCents - buyPriceCents) * count;
-                logger.info({ sellTrade, remainingAfter: pos.remaining, stopLossPnlCents: pos.stopLossPnlCents }, `Stop loss ${label} sell placed`);
+
+                if (actualFilled >= count) {
+                  // Immediately fully filled
+                  pos.remaining -= count;
+                  pos.stopLossPnlCents += (sellPriceInCents - buyPriceCents) * count;
+                  logger.info({ count, actualFilled, remainingAfter: pos.remaining }, `Stop loss ${label} filled immediately`);
+                } else if (actualFilled > 0) {
+                  // Partial immediate fill — rest is resting
+                  pos.remaining -= actualFilled;
+                  pos.stopLossPnlCents += (sellPriceInCents - buyPriceCents) * actualFilled;
+                  const restingCount = count - actualFilled;
+                  pos.pendingSellCount += restingCount;
+                  if (orderId) {
+                    state.restingSellOrders.push({ ticker: pos.ticker, orderId, side: pos.side, priceInCents: sellPriceInCents, count: restingCount });
+                    logger.warn({ count, actualFilled, restingCount, orderId }, `Stop loss ${label} partial fill — tracking resting sell`);
+                  }
+                } else {
+                  // Zero immediate fills — order is resting
+                  pos.pendingSellCount += count;
+                  if (orderId) {
+                    state.restingSellOrders.push({ ticker: pos.ticker, orderId, side: pos.side, priceInCents: sellPriceInCents, count });
+                    logger.warn({ count, orderId }, `Stop loss ${label} order resting — tracking for confirmation`);
+                  } else {
+                    // No order ID returned — optimistically assume filled to prevent over-selling
+                    pos.remaining -= count;
+                    pos.stopLossPnlCents += (sellPriceInCents - buyPriceCents) * count;
+                    logger.warn({ count, label }, "Stop loss sell: no order ID returned, assuming filled");
+                  }
+                }
               } catch (sellErr) {
                 const msg = sellErr instanceof Error ? sellErr.message : String(sellErr);
                 logger.error({ err: msg, label, count }, `Stop loss ${label} sell failed`);
@@ -729,13 +830,15 @@ async function runLoop(
 
               if (!pos.triggeredTiers[i] && currentPrice <= tier.priceCents / 100) {
                 pos.triggeredTiers[i] = true;
+                // Only sell contracts not already sent via previous tiers
+                const available = pos.remaining - pos.pendingSellCount;
                 let toSell: number;
                 if (isLastTier) {
-                  toSell = pos.remaining;
+                  toSell = available;
                 } else {
                   toSell = Math.min(
                     Math.max(1, Math.floor(pos.totalCount * tier.fraction)),
-                    pos.remaining,
+                    available,
                   );
                 }
                 if (toSell > 0) {
@@ -744,7 +847,11 @@ async function runLoop(
               }
             }
 
-            if (pos.remaining <= 0) {
+            const effectiveRemaining = pos.remaining - pos.pendingSellCount;
+            if (effectiveRemaining <= 0 && pos.pendingSellCount === 0) {
+              state.openPositions = state.openPositions.filter((p) => p.ticker !== pos.ticker);
+              void settlePositionFullStopLoss(pos);
+            } else if (pos.remaining <= 0) {
               state.openPositions = state.openPositions.filter((p) => p.ticker !== pos.ticker);
               void settlePositionFullStopLoss(pos);
             }
@@ -984,6 +1091,7 @@ async function runLoop(
                 side: tradeSide,
                 totalCount: filledCount,
                 remaining: filledCount,
+                pendingSellCount: 0,
                 boughtAt: exactBoughtAt,
                 triggeredTiers: new Array(stopLossTiers.length).fill(false),
                 stopLossPnlCents: 0,
