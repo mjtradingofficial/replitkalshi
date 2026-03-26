@@ -72,6 +72,8 @@ export interface MarketInfo {
   timeLeftSeconds: number;
   yesPrice: number | null;
   noPrice: number | null;
+  yesEma: number | null;
+  noEma: number | null;
 }
 
 export interface RestingOrder {
@@ -547,7 +549,24 @@ async function runLoop(
   checkIntervalMs: number,
   useStopLoss: boolean,
   stopLossTiers: StopLossTier[],
+  emaAlpha: number,
+  emaThreshold: number,
 ): Promise<void> {
+  // Per-market EMA state: initialised to 0.5 (neutral) so a first-poll spike never fires
+  const emaMap = new Map<string, { yesEma: number; noEma: number }>();
+
+  const getEma = (ticker: string) => {
+    if (!emaMap.has(ticker)) emaMap.set(ticker, { yesEma: 0.5, noEma: 0.5 });
+    return emaMap.get(ticker)!;
+  };
+
+  const updateEma = (ticker: string, yesPrice: number | null, noPrice: number | null) => {
+    const ema = getEma(ticker);
+    if (yesPrice !== null) ema.yesEma = emaAlpha * yesPrice + (1 - emaAlpha) * ema.yesEma;
+    if (noPrice !== null) ema.noEma = emaAlpha * noPrice + (1 - emaAlpha) * ema.noEma;
+    return ema;
+  };
+
   let displayRefreshTick = 0;
   const DISPLAY_REFRESH_EVERY = 10;
 
@@ -912,12 +931,15 @@ async function runLoop(
           }
         }
 
+        const nearestEma = getEma(nearest.market.ticker);
         state.currentMarket = {
           ticker: nearest.market.ticker,
           expirationTime: nearest.closeAt.toISOString(),
           timeLeftSeconds: Math.max(0, nearest.timeLeftSeconds),
           yesPrice: displayYes,
           noPrice: displayNo,
+          yesEma: nearestEma.yesEma,
+          noEma: nearestEma.noEma,
         };
       } else {
         state.currentMarket = null;
@@ -947,23 +969,33 @@ async function runLoop(
         if (state.tradedMarkets.includes(ticker)) continue;
 
         const { yesPrice, noPrice } = await getOrderbookPrices(ticker);
+        const { yesEma, noEma } = updateEma(ticker, yesPrice, noPrice);
 
         if (state.currentMarket?.ticker === ticker) {
-          state.currentMarket = { ...state.currentMarket, yesPrice, noPrice };
+          state.currentMarket = { ...state.currentMarket, yesPrice, noPrice, yesEma, noEma };
         }
 
         logger.info(
-          { ticker, timeLeftSeconds: Math.round(timeLeftSeconds), yesPrice, noPrice, threshold },
+          {
+            ticker,
+            timeLeftSeconds: Math.round(timeLeftSeconds),
+            yesPrice,
+            noPrice,
+            yesEma: Math.round(yesEma * 1000) / 1000,
+            noEma: Math.round(noEma * 1000) / 1000,
+            threshold,
+            emaThreshold,
+          },
           "Orderbook check",
         );
 
         let tradeSide: "yes" | "no" | null = null;
         let tradePrice = 0;
 
-        if (yesPrice !== null && yesPrice >= threshold) {
+        if (yesPrice !== null && yesPrice >= threshold && yesEma >= emaThreshold) {
           tradeSide = "yes";
           tradePrice = yesPrice;
-        } else if (noPrice !== null && noPrice >= threshold) {
+        } else if (noPrice !== null && noPrice >= threshold && noEma >= emaThreshold) {
           tradeSide = "no";
           tradePrice = noPrice;
         }
@@ -1131,6 +1163,8 @@ export interface BotConfig {
   checkIntervalMs?: number;
   useStopLoss?: boolean;
   stopLossTiers?: StopLossTier[];
+  emaAlpha?: number;      // EMA smoothing factor 0–1 (default 0.2; lower = smoother/slower)
+  emaThreshold?: number;  // EMA must reach this value before entry fires (default 0.88)
 }
 
 export async function startBot(config: BotConfig = {}): Promise<void> {
@@ -1155,6 +1189,8 @@ export async function startBot(config: BotConfig = {}): Promise<void> {
     checkIntervalMs = 500,
     useStopLoss = true,
     stopLossTiers = DEFAULT_STOP_LOSS_TIERS,
+    emaAlpha = 0.2,
+    emaThreshold = 0.88,
   } = config;
 
   await initializeFromDb();
@@ -1192,7 +1228,7 @@ export async function startBot(config: BotConfig = {}): Promise<void> {
   state.stopLossTiers = stopLossTiers;
 
   logger.info(
-    { tradeSize, threshold, windowSeconds, checkIntervalMs, useStopLoss, stopLossTiers },
+    { tradeSize, threshold, windowSeconds, checkIntervalMs, useStopLoss, stopLossTiers, emaAlpha, emaThreshold },
     "Starting Kalshi BTC15M bot (RSA-PSS auth)",
   );
 
@@ -1205,6 +1241,8 @@ export async function startBot(config: BotConfig = {}): Promise<void> {
     checkIntervalMs,
     useStopLoss,
     stopLossTiers,
+    emaAlpha,
+    emaThreshold,
   ).catch((err) => {
     state.status = "error";
     state.lastError = err instanceof Error ? err.message : String(err);
