@@ -872,7 +872,7 @@ async function runLoop(
               privateKey,
             );
             const balanceCents = balanceResp.balance;
-            contractCount = Math.max(1, Math.floor(balanceCents / priceInCents));
+            contractCount = Math.min(tradeSize, Math.max(1, Math.floor(balanceCents / priceInCents)));
             logger.info({ balanceCents, priceInCents, contractCount }, "Calculated max contracts from balance");
           } catch (balErr) {
             logger.warn({ err: balErr }, "Could not fetch balance, using fallback tradeSize");
@@ -937,7 +937,7 @@ async function runLoop(
                 // Refetch true available balance after cancellations
                 try {
                   const freshBalance = await kalshiAuthGet<{ balance: number }>("/portfolio/balance", apiKey, privateKey);
-                  contractCount = Math.max(1, Math.floor(freshBalance.balance / priceInCents));
+                  contractCount = Math.min(tradeSize, Math.max(1, Math.floor(freshBalance.balance / priceInCents)));
                   logger.info({ freshBalanceCents: freshBalance.balance, priceInCents, contractCount }, "Recalculated contracts after cancellations");
                 } catch { /* keep existing contractCount */ }
                 response = await placeOrder(contractCount);
