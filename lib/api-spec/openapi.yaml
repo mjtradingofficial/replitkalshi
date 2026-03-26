@@ -197,7 +197,10 @@ components:
       properties:
         tradeSize:
           type: integer
-          description: Number of contracts to buy per trade
+          description: Number of contracts to buy per trade (ignored when useAllBalance is true)
+        useAllBalance:
+          type: boolean
+          description: When true, stake the entire account balance on each trade instead of a fixed contract count
         thresholdCents:
           type: integer
           description: Price threshold in cents (e.g. 99 = $0.99)
@@ -207,6 +210,20 @@ components:
         checkIntervalMs:
           type: integer
           description: Polling interval in milliseconds
+        useStopLoss:
+          type: boolean
+          description: Whether to enable stop-loss tiers
+        stopLossTiers:
+          type: array
+          items:
+            $ref: "#/components/schemas/StopLossTier"
+          description: Stop-loss tier definitions
+        emaAlpha:
+          type: number
+          description: EMA smoothing factor (0-1, default 0.2)
+        emaThreshold:
+          type: number
+          description: EMA must reach this value before entry fires (default 0.88)
 
     BotActionResponse:
       type: object

@@ -1011,8 +1011,9 @@ async function runLoop(
               privateKey,
             );
             const balanceCents = balanceResp.balance;
-            contractCount = Math.min(tradeSize, Math.max(1, Math.floor(balanceCents / priceInCents)));
-            logger.info({ balanceCents, priceInCents, contractCount }, "Calculated max contracts from balance");
+            const maxFromBalance = Math.max(1, Math.floor(balanceCents / priceInCents));
+            contractCount = useAllBalance ? maxFromBalance : Math.min(tradeSize, maxFromBalance);
+            logger.info({ balanceCents, priceInCents, contractCount, useAllBalance }, "Calculated contracts from balance");
           } catch (balErr) {
             logger.warn({ err: balErr }, "Could not fetch balance, using fallback tradeSize");
           }
@@ -1076,8 +1077,9 @@ async function runLoop(
                 // Refetch true available balance after cancellations
                 try {
                   const freshBalance = await kalshiAuthGet<{ balance: number }>("/portfolio/balance", apiKey, privateKey);
-                  contractCount = Math.min(tradeSize, Math.max(1, Math.floor(freshBalance.balance / priceInCents)));
-                  logger.info({ freshBalanceCents: freshBalance.balance, priceInCents, contractCount }, "Recalculated contracts after cancellations");
+                  const freshMax = Math.max(1, Math.floor(freshBalance.balance / priceInCents));
+                  contractCount = useAllBalance ? freshMax : Math.min(tradeSize, freshMax);
+                  logger.info({ freshBalanceCents: freshBalance.balance, priceInCents, contractCount, useAllBalance }, "Recalculated contracts after cancellations");
                 } catch { /* keep existing contractCount */ }
                 response = await placeOrder(contractCount);
               } else {
@@ -1158,6 +1160,7 @@ function sleep(ms: number): Promise<void> {
 
 export interface BotConfig {
   tradeSize?: number;
+  useAllBalance?: boolean; // when true, ignore tradeSize and bet full available balance
   threshold?: number;
   windowSeconds?: number;
   checkIntervalMs?: number;
@@ -1184,6 +1187,7 @@ export async function startBot(config: BotConfig = {}): Promise<void> {
 
   const {
     tradeSize = 10,
+    useAllBalance = false,
     threshold = 0.97,
     windowSeconds = 180,
     checkIntervalMs = 500,

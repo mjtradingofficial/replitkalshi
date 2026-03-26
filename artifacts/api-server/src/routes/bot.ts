@@ -70,6 +70,7 @@ router.get("/bot/trades", async (_req, res) => {
 router.post("/bot/start", (req, res) => {
   const body = req.body as {
     tradeSize?: number;
+    useAllBalance?: boolean;
     thresholdCents?: number;
     windowSeconds?: number;
     checkIntervalMs?: number;
@@ -85,6 +86,7 @@ router.post("/bot/start", (req, res) => {
 
   startBot({
     tradeSize: body.tradeSize,
+    useAllBalance: body.useAllBalance,
     threshold,
     windowSeconds: body.windowSeconds,
     checkIntervalMs: body.checkIntervalMs,

@@ -86,8 +86,10 @@ export interface TradeList {
 }
 
 export interface BotStartConfig {
-  /** Number of contracts to buy per trade (fallback only; bot uses max affordable) */
+  /** Number of contracts to buy per trade (ignored when useAllBalance is true) */
   tradeSize?: number;
+  /** When true, stake the entire account balance on each trade instead of a fixed contract count */
+  useAllBalance?: boolean;
   /** Price threshold in cents (e.g. 97 = $0.97) */
   thresholdCents?: number;
   /** Seconds before expiry to start watching the market */
@@ -98,6 +100,10 @@ export interface BotStartConfig {
   useStopLoss?: boolean;
   /** Ordered stop loss tiers (last tier always sells all remaining) */
   stopLossTiers?: StopLossTier[];
+  /** EMA smoothing factor 0-1 (default 0.2) */
+  emaAlpha?: number;
+  /** EMA must reach this value before entry fires (default 0.88) */
+  emaThreshold?: number;
 }
 
 export interface BotActionResponse {

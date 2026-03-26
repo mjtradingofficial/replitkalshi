@@ -30,7 +30,7 @@ export default function Dashboard() {
           </div>
           <div>
             <h1 className="text-3xl font-bold tracking-tight text-foreground flex items-center gap-3">
-              KALSHI NEURAL-NET
+              Bob
               <span className="px-2 py-0.5 rounded bg-primary/20 text-primary text-xs font-mono tracking-widest border border-primary/30 align-middle">v1.0.0</span>
             </h1>
             <p className="text-muted-foreground text-sm tracking-wide mt-1 font-mono">AUTONOMOUS BTC 15-MIN OPTIONS EXECUTION</p>

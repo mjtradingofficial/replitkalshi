@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import {
-  Activity, Square, AlertTriangle, Play, Plus, Trash2, Info, ShieldOff, Shield,
+  Activity, Square, AlertTriangle, Play, Plus, Trash2, Info, ShieldOff, Shield, Wallet, Hash,
 } from "lucide-react";
 import { useGetBotStatus, useStartBot, useStopBot } from "@workspace/api-client-react";
 import type { StopLossTier } from "@workspace/api-client-react";
@@ -102,6 +102,8 @@ export function StatusCard() {
   const [thresholdCents, setThresholdCents] = useState(97);
   const [windowSeconds, setWindowSeconds] = useState(180);
   const [checkIntervalMs, setCheckIntervalMs] = useState(500);
+  const [useAllBalance, setUseAllBalance] = useState(false);
+  const [tradeSize, setTradeSize] = useState(10);
   const [useStopLoss, setUseStopLoss] = useState(true);
   const [tiers, setTiers] = useState<StopLossTier[]>(DEFAULT_TIERS);
 
@@ -133,6 +135,8 @@ export function StatusCard() {
         thresholdCents,
         windowSeconds,
         checkIntervalMs,
+        useAllBalance,
+        tradeSize: useAllBalance ? undefined : tradeSize,
         useStopLoss,
         stopLossTiers: tiers,
       },
@@ -312,6 +316,58 @@ export function StatusCard() {
                   />
                   <span className="text-muted-foreground text-sm shrink-0">ms</span>
                 </div>
+              </div>
+
+              {/* Position Size */}
+              <div>
+                <FieldLabel>
+                  Position Size{" "}
+                  <Hint text="Fixed: buy a set number of contracts per trade. Full Balance: bet everything available in your account each time." />
+                </FieldLabel>
+                <div className="flex rounded-xl border border-card-border overflow-hidden mb-3">
+                  <button
+                    type="button"
+                    onClick={() => setUseAllBalance(false)}
+                    className={cn(
+                      "flex-1 flex items-center justify-center gap-2 py-2.5 text-sm font-semibold transition-all",
+                      !useAllBalance
+                        ? "bg-primary/20 text-primary"
+                        : "bg-black/40 text-muted-foreground hover:text-foreground hover:bg-white/5"
+                    )}
+                  >
+                    <Hash className="w-4 h-4" /> Fixed Contracts
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setUseAllBalance(true)}
+                    className={cn(
+                      "flex-1 flex items-center justify-center gap-2 py-2.5 text-sm font-semibold transition-all",
+                      useAllBalance
+                        ? "bg-danger/20 text-danger"
+                        : "bg-black/40 text-muted-foreground hover:text-foreground hover:bg-white/5"
+                    )}
+                  >
+                    <Wallet className="w-4 h-4" /> Full Balance
+                  </button>
+                </div>
+
+                {!useAllBalance ? (
+                  <div className="flex items-center gap-2">
+                    <NumberInput
+                      value={tradeSize}
+                      onChange={(v) => setTradeSize(Math.max(1, v))}
+                      min={1}
+                    />
+                    <span className="text-muted-foreground text-sm shrink-0">contracts</span>
+                  </div>
+                ) : (
+                  <div className="bg-danger/5 border border-danger/20 rounded-xl p-3">
+                    <p className="text-xs text-danger flex items-center gap-2">
+                      <Wallet className="w-3.5 h-3.5 shrink-0" />
+                      Bob will stake your entire account balance on every trade. Use with care.
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
           </div>
